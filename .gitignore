@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+# El .exe se publica en Releases, no en el repositorio
+*.exe
