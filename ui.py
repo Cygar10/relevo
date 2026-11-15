@@ -1,4 +1,8 @@
-"""Interfaz de Relevo: ventana sin marco de Windows, editor de macros y ajustes."""
+"""Interfaz de Relevo: ventana sin marco de Windows, editor de macros y ajustes.
+
+Casi todo se dibuja en unos pocos lienzos (ver lienzo.py) en vez de usar un widget por control:
+asi la ventana abre y cambia de tamaño sin verse cargar por partes.
+"""
 import copy
 import ctypes
 import os
@@ -15,7 +19,9 @@ from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
 import datos
 import entrada
-from datos import MODOS, PASOS, PLANTILLAS
+import patron
+from datos import PASOS, PLANTILLAS
+from lienzo import LETRA, MONO, Barra, Escena, Recursos
 from lista_pasos import ListaPasos
 from registro import Registro
 
@@ -29,27 +35,16 @@ ACENTOS = ["#C8F04B", "#4BD6F0", "#FF7A59", "#A78BFA", "#F472B6", "#FBBF24"]
 ROJO, AMBAR = "#EF5350", "#F5B841"
 
 I_ADD, I_EDIT, I_COPY, I_DEL = "", "", "", ""
-I_UP, I_DOWN, I_PLAY, I_STOP = "", "", "", ""
-I_GEAR, I_MIN, I_CLOSE, I_COMPACT, I_EXPAND = "", "", "", "", ""
-I_LOG, I_MAX, I_RESTORE, I_CHEVRON = "\uE81C", "\uE922", "\uE923", "\uE70D"
-I_IMPORT, I_EXPORT, I_REC, I_BACK ="", "", "", ""
+I_PLAY, I_STOP, I_GEAR, I_BACK = "", "", "", ""
+I_MIN, I_MAX, I_RESTORE, I_CLOSE, I_COMPACT, I_EXPAND = "", "", "", "", "", ""
+I_LOG, I_IMPORT, I_EXPORT = "", "", ""
 
 ANCHO_COMPACTO, MIN_ANCHO, MIN_ALTO = 300, 980, 520
 BORDE_REDIMENSION = 5
 CURSORES = {"n": "sb_v_double_arrow", "s": "sb_v_double_arrow", "e": "sb_h_double_arrow", "w": "sb_h_double_arrow",
             "nw": "size_nw_se", "se": "size_nw_se", "ne": "size_ne_sw", "sw": "size_ne_sw"}
-
-
-def fuente(tam=12, negrita=False):
-    return ("Segoe UI", tam, "bold" if negrita else "normal")
-
-
-def f_icono(tam=12):
-    return ("Segoe MDL2 Assets", tam)
-
-
-def f_tecla(tam=11):
-    return ("Consolas", tam, "bold")
+MODOS_CORTOS = {"Alternar": "alternar", "Mantener": "mantener", "Una vez": "una_vez"}
+AYUDA_PATRON = "Tecla y segundos, separadas por comas. Ejemplo: A 3, D 5, W 1-2, Espacio x3, espera 1.5"
 
 
 def _rgb(c):
@@ -123,65 +118,49 @@ def captura_ventana(hwnd):
         u.ReleaseDC(hwnd, dc)
 
 
-class Selector(ctk.CTkFrame):
-    """Desplegable propio: el de CustomTkinter usa el menu antiguo de Windows."""
+class Flujo:
+    """Coloca etiquetas y campos de izquierda a derecha, por renglones, dentro de una escena."""
 
-    def __init__(self, app, padre, valores, actual, comando, ancho=None, alto=30, fondo=None, extra=None):
-        t = app.t
-        self.app, self.valores, self.actual, self.comando, self.extra = app, valores, actual, comando, extra
-        self.fondo = fondo or t["tarjeta"]
-        super().__init__(padre, fg_color=self.fondo, corner_radius=7, height=alto, border_width=1, border_color=t["borde"], **({"width": ancho} if ancho else {}))
-        self.pack_propagate(False)
-        self.lbl = ctk.CTkLabel(self, text=actual, font=fuente(12), text_color=t["texto"], anchor="w", height=alto - 4)
-        self.lbl.pack(side="left", fill="x", expand=True, padx=(10, 2), pady=2)
-        self.chev = ctk.CTkLabel(self, text=I_CHEVRON, font=f_icono(9), text_color=t["tenue"], width=22, height=alto - 4)
-        self.chev.pack(side="right", padx=(0, 4), pady=2)
-        for w in (self, self.lbl, self.chev):
-            w.bind("<ButtonRelease-1>", lambda _: self.abrir())
-            w.bind("<Enter>", lambda _: self.configure(border_color=t["tenue"]))
-            w.bind("<Leave>", lambda _: self.configure(border_color=t["borde"]))
+    def __init__(self, app, s, ancho):
+        self.app, self.s, self.ancho = app, s, ancho
+        self.x = self.y = 0
+        self.alto = s.px(34)
 
-    def abrir(self):
-        def elegir(v):
-            self.set(v)
-            self.comando(v)
-        self.app.abrir_menu(self, self.valores, self.actual, elegir, self.extra)
+    @property
+    def medio(self):
+        return self.y + self.alto // 2
 
-    def set(self, valor):
-        self.actual = valor
-        self.lbl.configure(text=valor)
+    @property
+    def resto(self):
+        return self.ancho - self.x
 
+    def etq(self, texto, izq=0, color=None):
+        self.x += self.s.px(izq)
+        item = self.s.texto(self.x, self.medio, texto, 11, color=color or self.app.t["tenue"])
+        self.x += self.s.medir(texto, 11) + self.s.px(6)
+        return item
 
-class Aviso:
-    """Tooltip para los botones que solo tienen icono."""
+    def num(self, obj, clave, tipo, minimo, maximo, ancho=56):
+        self.app._num(self.s, self.x, self.y + self.s.px(3), self.s.px(ancho), self.s.px(28), obj, clave, tipo, minimo, maximo)
+        self.x += self.s.px(ancho + 6)
 
-    def __init__(self, widget, texto, tema):
-        self.widget, self.texto, self.tema = widget, texto, tema
-        self.ventana = self.tarea = None
-        widget.bind("<Enter>", self._programar, add="+")
-        widget.bind("<Leave>", self._ocultar, add="+")
-        widget.bind("<Button-1>", self._ocultar, add="+")
+    def rango(self, p, etiqueta, a="min", b="max", final="segundos"):
+        self.etq(etiqueta)
+        self.num(p, a, float, 0, 86400)
+        self.etq("y")
+        self.num(p, b, float, 0, 86400)
+        self.etq(final)
 
-    def _programar(self, _):
-        self.tarea = self.widget.after(450, self._mostrar)
+    def hueco(self, ancho):
+        """Reserva `ancho` para un control y devuelve donde empieza."""
+        x, self.x = self.x, self.x + ancho + self.s.px(8)
+        return x, self.y + self.s.px(3)
 
-    def _mostrar(self):
-        if not self.widget.winfo_exists():
-            return
-        v = self.ventana = tk.Toplevel(self.widget)
-        v.overrideredirect(True)
-        v.attributes("-topmost", True)
-        tk.Label(v, text=self.texto, bg=self.tema["tarjeta"], fg=self.tema["texto"], font=fuente(9), padx=8, pady=3,
-                 highlightthickness=1, highlightbackground=self.tema["borde"]).pack()
-        v.geometry(f"+{self.widget.winfo_rootx()}+{self.widget.winfo_rooty() + self.widget.winfo_height() + 4}")
+    def salto(self):
+        self.x, self.y = 0, self.y + self.alto
 
-    def _ocultar(self, _=None):
-        if self.tarea:
-            self.widget.after_cancel(self.tarea)
-            self.tarea = None
-        if self.ventana:
-            self.ventana.destroy()
-            self.ventana = None
+    def fin(self):
+        return self.y + self.alto
 
 
 class App:
@@ -189,23 +168,33 @@ class App:
         self.root, self.a, self.motor = root, almacen, motor
         self.vista = "editor"
         self.sel = None
-        self.filas = {}
         self.cola = queue.SimpleQueue()
         self._guardado = None
-        self._estado_filas = {}
+        self._estado_macros = None
         self._cuenta_atras = None
-        self._boton_capturando = None
+        self._captura_ui = None
+        self._apuntando = None
         self._ultimo_guardado_stats = 0
         self.t = {}
-        self.pasos_ui = None
+        self.rec = None
+        self.pasos_ui = self.cab = self.lista = self.lat_pie = self.barra = None
         self._pantalla = None       # None, "max" o "completa"
         self._geom_normal = None
         self._redim = None
         self._redim_tarea = None
         self._zona = ""
         self._oculta = False
+        self._arrancando = True
         self._menu = self._menu_ancla = None
         self._dlg = None
+        self._aviso = ("", None)
+        self._aviso_tarea = None
+        self._ayuda_tarea = self._ayuda_ventana = None
+        self._fila_mov = None
+        self._nombre_pendiente = None
+        self._nombre_sucio = False
+        self._registro_dia = None
+        self._id_stats = None
         self.registro = Registro(almacen.ajustes, os.path.join(os.path.dirname(almacen.ruta), "logs"))
         self.registro.limpiar()
         motor.registro = self.registro.anotar
@@ -252,12 +241,15 @@ class App:
     def macro(self):
         return next((m for m in self.macros if m["id"] == self.sel), None)
 
+    def px(self, v):
+        return round(v * self._escala())
+
     def _aplicar_motor(self):
         aj = self.a.ajustes
         self.motor.configurar(self.macros, aj["tecla_detener"], aj["tecla_cerrar"])
 
     def _confirmar_nombre(self):
-        pendiente, self._nombre_pendiente = getattr(self, "_nombre_pendiente", None), None
+        pendiente, self._nombre_pendiente = self._nombre_pendiente, None
         if pendiente and pendiente[0].winfo_exists():
             pendiente[1]()
 
@@ -275,10 +267,15 @@ class App:
         except OSError as e:
             self.aviso(f"No se pudo guardar: {e}", ROJO)
 
+    def _fijar(self, obj, clave, valor):
+        obj[clave] = valor
+        self._guardar_pronto()
+
     # ---------------------------------------------------- ventana sin marco
     def _quitar_marco(self):
         """Quita la barra blanca de Windows (y su menu) dejando el icono en la barra de tareas."""
         self.root.overrideredirect(True)
+        self.root.attributes("-alpha", 0)  # invisible hasta que todo este dibujado
         self.root.update_idletasks()
         u = entrada.user32
         self.hwnd = u.GetParent(self.root.winfo_id())
@@ -286,14 +283,32 @@ class App:
         u.SetWindowLongPtrW.restype = ctypes.c_ssize_t
         u.GetWindowLongPtrW.argtypes = (ctypes.c_void_p, ctypes.c_int)
         u.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+        self._sin_repintado_total()
         self.root.withdraw()
         self.root.after(30, self._mostrar_ventana)
         self.root.after(300, self._fijar_iconos)
+
+    def _sin_repintado_total(self):
+        """Tk pide a Windows repintar la ventana entera cada vez que cambia de tamaño, y despues Tk
+        vuelve a pintar lo que cambio: el doble de trabajo. Sin esas dos banderas Windows solo pide
+        pintar la parte nueva, y cambiar el tamaño va mas del doble de rapido."""
+        u = entrada.user32
+        u.GetClassLongPtrW.argtypes, u.GetClassLongPtrW.restype = (ctypes.c_void_p, ctypes.c_int), ctypes.c_size_t
+        u.SetClassLongPtrW.argtypes, u.SetClassLongPtrW.restype = (ctypes.c_void_p, ctypes.c_int, ctypes.c_size_t), ctypes.c_size_t
+        for ventana in (self.hwnd, self.root.winfo_id()):  # la clase de la ventana y la de todo lo de adentro
+            estilo = u.GetClassLongPtrW(ventana, -26)       # GCL_STYLE
+            u.SetClassLongPtrW(ventana, -26, estilo & ~0x3)  # sin CS_HREDRAW ni CS_VREDRAW
 
     def _mostrar_ventana(self):
         self.root.deiconify()
         self.root.update_idletasks()
         self._estilo_ventana()
+        self.root.update_idletasks()
+        self.root.after(30, self._terminar_arranque)
+
+    def _terminar_arranque(self):
+        self._arrancando = False
+        self._revelar(0)
         self.root.focus_force()
 
     def _estilo_ventana(self):
@@ -323,8 +338,11 @@ class App:
     def _escala(self):
         return ctk.ScalingTracker.get_window_scaling(self.root)
 
+    def _opacidad(self):
+        return max(self.a.ajustes["opacidad"], 40) / 100
+
     def _minimizar(self):
-        # Oculta antes de minimizar: al volver, Tk redibuja cada widget y se veria cargar por partes.
+        # Oculta antes de minimizar: al volver se muestra de una vez, ya dibujada.
         self.root.attributes("-alpha", 0)
         self._oculta = True
         entrada.user32.ShowWindow(self.hwnd, 6)  # SW_MINIMIZE
@@ -340,28 +358,18 @@ class App:
             self.root.after(15, lambda: self._revelar(0))
 
     def _revelar(self, paso):
-        final = max(self.a.ajustes["opacidad"], 40) / 100
         pasos = (0.5, 0.8, 1)
         if self._oculta:
             return
-        self.root.attributes("-alpha", final * pasos[paso])
+        self.root.attributes("-alpha", self._opacidad() * pasos[paso])
         if paso < 2:
             self.root.after(15, lambda: self._revelar(paso + 1))
-
-    def _inicio_arrastre(self, e):
-        self._arrastre = (e.x_root - self.root.winfo_x(), e.y_root - self.root.winfo_y())
-
-    def _arrastrar(self, e):
-        if self._pantalla or self._redim:
-            return
-        dx, dy = self._arrastre
-        tk.Tk.geometry(self.root, f"+{e.x_root - dx}+{e.y_root - dy}")
 
     def _aplicar_ventana(self):
         aj = self.a.ajustes
         self.root.attributes("-topmost", bool(aj["encima"]))
-        if not self._oculta:
-            self.root.attributes("-alpha", max(aj["opacidad"], 40) / 100)
+        if not self._oculta and not self._arrancando:
+            self.root.attributes("-alpha", self._opacidad())
         if self._pantalla:
             return
         e = self._escala()
@@ -389,8 +397,8 @@ class App:
         if self.a.ajustes["compacto"] and self._pantalla:
             self.a.ajustes["compacto"] = False
             self.construir()
-        elif self.btn_max.winfo_exists():
-            self.btn_max.configure(text=I_RESTORE if self._pantalla else I_MAX)
+        else:
+            self.barra.repintar()
         self._zona = ""
         tk.Tk.configure(self.root, cursor="")
 
@@ -428,6 +436,10 @@ class App:
                 z += "e"
         return z
 
+    def en_borde(self, e):
+        """Las escenas preguntan esto para no robarle el click al borde que cambia el tamaño."""
+        return bool(self._redim or self._zona_de(e))
+
     def _mover_global(self, e):
         if self._redim:
             return
@@ -447,7 +459,7 @@ class App:
         if self._redim:
             self._redim["ultimo"] = (e.x_root, e.y_root)
             if not self._redim_tarea:
-                self._redim_tarea = self.root.after(16, self._aplicar_redim)
+                self._redim_tarea = self.root.after(12, self._aplicar_redim)
 
     def _aplicar_redim(self):
         self._redim_tarea = None
@@ -470,6 +482,7 @@ class App:
             h = max(r["h"] - dy, min_h)
             y = r["ry"] + r["h"] - h
         tk.Tk.geometry(self.root, f"{w}x{h}+{x}+{y}")
+        self.root.update_idletasks()  # dibuja ya: si no, los eventos del mouse se adelantan al dibujo
 
     def _soltar_global(self, e):
         if not self._redim:
@@ -484,8 +497,12 @@ class App:
         self._guardar_pronto()
 
     def _rueda_global(self, e):
-        if self.pasos_ui and str(e.widget).startswith(str(self.pasos_ui.lienzo)):
-            self.pasos_ui.rueda(e.delta)
+        w = e.widget
+        while w is not None and not isinstance(w, str):
+            if callable(getattr(w, "rueda", None)):
+                w.rueda(e.delta)
+                return
+            w = getattr(w, "master", None)
 
     def _al_escape(self, _=None):
         if self._menu:
@@ -499,46 +516,83 @@ class App:
         if self._dlg:
             self._dlg["aceptar"]()
 
-    # ------------------------------------------------------------ desplegable
-    def abrir_menu(self, ancla, valores, actual, al_elegir, extra=None):
-        if self._menu_ancla is ancla:
-            self._cerrar_menu()
+    def _quitar_foco(self, e):
+        if not isinstance(e.widget, (tk.Entry, tk.Text, str)):
+            try:
+                self.root.focus_set()
+            except tk.TclError:
+                pass
+
+    # --------------------------------------------------- ayuda al pasar
+    def ayuda(self, escena, zona):
+        """Programa el texto de ayuda de la zona bajo el mouse, u oculta el que haya."""
+        if self._ayuda_tarea:
+            self.root.after_cancel(self._ayuda_tarea)
+            self._ayuda_tarea = None
+        if self._ayuda_ventana:
+            self._ayuda_ventana.destroy()
+            self._ayuda_ventana = None
+        if zona is not None and zona.ayuda:
+            self._ayuda_tarea = self.root.after(450, lambda: self._mostrar_ayuda(escena, zona))
+
+    def _mostrar_ayuda(self, escena, zona):
+        self._ayuda_tarea = None
+        if not escena.winfo_exists() or escena._hover is not zona:
             return
+        v = self._ayuda_ventana = tk.Toplevel(self.root)
+        v.overrideredirect(True)
+        v.attributes("-topmost", True)
+        tk.Label(v, text=zona.ayuda, bg=self.t["tarjeta"], fg=self.t["texto"], font=(LETRA, -self.px(12)), padx=8, pady=3,
+                 highlightthickness=1, highlightbackground=self.t["borde"]).pack()
+        v.update_idletasks()
+        x = escena.winfo_rootx() + int(zona.x0 - escena.canvasx(0))
+        y = escena.winfo_rooty() + int(zona.y1 - escena.canvasy(0)) + 4
+        v.geometry(f"+{max(min(x, v.winfo_screenwidth() - v.winfo_reqwidth() - 4), 0)}+{y}")
+
+    # ------------------------------------------------------------ desplegable
+    def abrir_menu(self, escena, caja, valores, actual, al_elegir, extra=None):
+        """Menu bajo un selector. `caja` es (x, y, ancho, alto) del selector dentro de su escena."""
+        ancla = (escena, caja)
+        repetido = self._menu_ancla == ancla
         self._cerrar_menu()
+        if repetido:
+            return
         t = self.t
-        esc = self._escala()
-        ancho = max(round(ancla.winfo_width() / esc), 150)
-        m = ctk.CTkFrame(self.marco, fg_color=t["tarjeta"], corner_radius=10, border_width=1, border_color=t["borde"])
-        contenedor = m
-        if len(valores) > 8:
-            contenedor = ctk.CTkScrollableFrame(m, fg_color="transparent", width=ancho - 30, height=8 * 34,
-                                                scrollbar_button_color=t["borde"], scrollbar_button_hover_color=t["tenue"])
-            contenedor.pack(padx=4, pady=4)
+        fila = self.px(34)
+        extra = extra or []
+        x, y, w, h = caja
+        ancho = max(w, self.px(150))
+        filas = len(valores) + len(extra)
+        alto = min(filas, 9) * fila + self.px(8) + (self.px(7) if extra else 0)
 
-        def fila(padre, texto, comando, seleccionado=False, color=None):
-            b = ctk.CTkButton(padre, text=texto, anchor="w", height=32, width=ancho - 12, corner_radius=7, font=fuente(12, seleccionado),
-                              fg_color=t["suave"] if seleccionado else "transparent", hover_color=t["suave"],
-                              text_color=color or t["texto"], command=comando)
-            b.pack(padx=5, pady=1)
-
-        def elegir(v):
+        def elegir(fn, *args):
             self._cerrar_menu()
-            al_elegir(v)
-        for v in valores:
-            fila(contenedor, v, lambda x=v: elegir(x), v == actual)
-        if extra:
-            ctk.CTkFrame(m, fg_color=t["borde"], height=1, corner_radius=0).pack(fill="x", padx=8, pady=3)
+            fn(*args)
+            if escena.winfo_exists():
+                escena.repintar()
+
+        def dibujar(s, an, _):
+            yy = self.px(4)
+            for v in valores:
+                s.boton(self.px(4), yy + 1, an - self.px(8), fila - 2, v, lambda v=v: elegir(al_elegir, v), izquierda=True,
+                        negrita=v == actual, color=t["suave"] if v == actual else None)
+                yy += fila
+            if extra:
+                s.create_rectangle(self.px(8), yy + self.px(3), an - self.px(8), yy + self.px(3) + 1, fill=t["borde"], width=0)
+                yy += self.px(7)
             for texto, fn in extra:
-                fila(m, texto, lambda f=fn: (self._cerrar_menu(), f()), color=t["acento"] if t["modo"] == "dark" else t["texto"])
-        ctk.CTkFrame(m, fg_color="transparent", height=4, width=1).pack()
-        m.update_idletasks()
-        x = ancla.winfo_rootx() - self.marco.winfo_rootx()
-        y = ancla.winfo_rooty() - self.marco.winfo_rooty() + ancla.winfo_height() + round(4 * esc)
-        if y + m.winfo_reqheight() > self.marco.winfo_height():
-            y = max(ancla.winfo_rooty() - self.marco.winfo_rooty() - m.winfo_reqheight() - round(4 * esc), 0)
-        x = min(x, self.marco.winfo_width() - m.winfo_reqwidth() - round(4 * esc))
-        m.place(x=x / esc, y=y / esc)
-        m.lift()
+                s.boton(self.px(4), yy + 1, an - self.px(8), fila - 2, texto, lambda fn=fn: elegir(fn), izquierda=True, negrita=False,
+                        color_texto=t["acento"] if t["modo"] == "dark" else t["texto"])
+                yy += fila
+            return yy + self.px(4)
+        m = Escena(self.marco, self, dibujar, fondo=t["tarjeta"], desplazable=filas > 9, highlightthickness=1, highlightbackground=t["borde"])
+        mx = escena.winfo_rootx() - self.marco.winfo_rootx() + int(x - escena.canvasx(0))
+        my = escena.winfo_rooty() - self.marco.winfo_rooty() + int(y - escena.canvasy(0))
+        abajo = my + h + self.px(4)
+        if abajo + alto > self.marco.winfo_height():
+            abajo = max(my - alto - self.px(4), 0)
+        m.place(x=max(min(mx, self.marco.winfo_width() - ancho - self.px(4)), 0), y=abajo, width=ancho, height=alto)
+        tk.Misc.lift(m)  # en un lienzo, lift() a secas sube figuras, no el widget
         self._menu, self._menu_ancla = m, ancla
 
     def _cerrar_menu(self):
@@ -549,103 +603,86 @@ class App:
     def _cerrar_menu_si_afuera(self, e):
         if not self._menu:
             return
-        w = str(e.widget)
-        if w.startswith(str(self._menu)) or (self._menu_ancla.winfo_exists() and w.startswith(str(self._menu_ancla))):
+        if str(e.widget).startswith(str(self._menu)):
             return
+        escena, (x, y, w, h) = self._menu_ancla
+        if e.widget is escena and escena.winfo_exists():
+            cx, cy = escena.canvasx(e.x), escena.canvasy(e.y)
+            if x <= cx < x + w and y <= cy < y + h:
+                return  # el propio selector lo cierra al soltar
         self._cerrar_menu()
-
-    def _quitar_foco(self, e):
-        if not isinstance(e.widget, (tk.Entry, str)):
-            try:
-                self.root.focus_set()
-            except tk.TclError:
-                pass
 
     # ----------------------------------------------------------- construir
     def construir(self):
         self._confirmar_nombre()
+        self.cancelar_captura()
         tema = TEMAS.get(self.a.ajustes["tema"], TEMAS["Noche"])
         acento = self.a.ajustes["acento"]
         self.t = dict(tema, acento=acento, sobre=sobre(acento), hover=mezclar(acento, tema["fondo"], 0.18),
-                      suave=mezclar(tema["tarjeta"], tema["texto"], 0.08))
+                      suave=mezclar(tema["tarjeta"], tema["texto"], 0.08), seleccion=mezclar(acento, tema["panel"], 0.55))
         ctk.set_appearance_mode(tema["modo"])
-        self._menu = self._menu_ancla = self._dlg = self.pasos_ui = None
+        self.rec = Recursos(self.root)
+        self._menu = self._menu_ancla = self._dlg = self.pasos_ui = self.cab = None
+        self._ayuda_tarea = self._ayuda_ventana = None
         for w in self.root.winfo_children():
             w.destroy()
         self.root.configure(fg_color=self.t["borde"])
 
-        self.marco = ctk.CTkFrame(self.root, fg_color=self.t["fondo"], corner_radius=0)
+        t, px = self.t, self.px
+        self.marco = tk.Frame(self.root, bg=t["fondo"])
         self.marco.pack(fill="both", expand=True, padx=1, pady=1)
-        self._barra_titulo()
-        cuerpo = ctk.CTkFrame(self.marco, fg_color="transparent", corner_radius=0)
+        self.barra = Escena(self.marco, self, self._dibujar_barra, fondo=t["panel"], height=px(40))
+        self.barra.pack(fill="x")
+        cuerpo = tk.Frame(self.marco, bg=t["fondo"])
         cuerpo.pack(fill="both", expand=True)
-        self.lateral = ctk.CTkFrame(cuerpo, fg_color=self.t["panel"], corner_radius=0, width=ANCHO_COMPACTO - 2)
+        self.lateral = tk.Frame(cuerpo, bg=t["panel"], width=px(ANCHO_COMPACTO - 2))
         self.lateral.pack(side="left", fill="y")
         self.lateral.pack_propagate(False)
-        self.principal = ctk.CTkFrame(cuerpo, fg_color="transparent", corner_radius=0)
+        self.principal = tk.Frame(cuerpo, bg=t["fondo"])
         if not self.a.ajustes["compacto"]:
             self.principal.pack(side="left", fill="both", expand=True)
         self._construir_lateral()
         self.pintar_principal()
         self._aplicar_ventana()
 
-    def _boton_icono(self, padre, icono, comando, ayuda=None, tam=12, ancho=30, alto=30, color=None, hover=None, texto=None):
-        b = ctk.CTkButton(padre, text=icono, font=f_icono(tam), width=ancho, height=alto, corner_radius=6,
-                          fg_color=color or "transparent", hover_color=hover or self.t["suave"],
-                          text_color=texto or self.t["tenue"], command=comando)
-        if ayuda:
-            Aviso(b, ayuda, self.t)
-        return b
-
-    def _boton(self, padre, texto, comando, primario=False, **kw):
-        estilo = dict(fg_color=self.t["acento"], hover_color=self.t["hover"], text_color=self.t["sobre"]) if primario else \
-            dict(fg_color=self.t["suave"], hover_color=self.t["borde"], text_color=self.t["texto"])
-        estilo.update(kw)
-        estilo.setdefault("height", 32)
-        estilo.setdefault("corner_radius", 7)
-        estilo.setdefault("font", fuente(12, True))
-        return ctk.CTkButton(padre, text=texto, command=comando, **estilo)
-
-    def _texto(self, padre, texto, tam=12, negrita=False, color=None, **kw):
-        return ctk.CTkLabel(padre, text=texto, font=fuente(tam, negrita), text_color=color or self.t["texto"], **kw)
-
-    def _barra_titulo(self):
-        barra = ctk.CTkFrame(self.marco, fg_color=self.t["panel"], corner_radius=0, height=40)
-        barra.pack(fill="x")
-        barra.pack_propagate(False)
-        grande = dibujar_logo(88, self.t["acento"], self.t["sobre"])
-        logo = ctk.CTkLabel(barra, text="", image=ctk.CTkImage(grande, grande, size=(22, 22)))
-        logo.pack(side="left", padx=(12, 8))
-        nombre = self._texto(barra, datos.APP, 13, True)
-        nombre.pack(side="left")
-        self.lbl_aviso = self._texto(barra, "", 11, color=self.t["tenue"])
-        self.lbl_aviso.pack(side="left", padx=12)
-
-        cerrar = self._boton_icono(barra, I_CLOSE, self.cerrar, tam=10, ancho=44, alto=40, hover=ROJO)
-        cerrar.configure(corner_radius=0)
-        cerrar.pack(side="right")
-        self.btn_max = self._boton_icono(barra, I_RESTORE if self._pantalla else I_MAX, lambda: self._alternar_pantalla(self._pantalla or "max"),
-                                         "Maximizar (F11: pantalla completa)", tam=10, ancho=44, alto=40)
-        self.btn_max.configure(corner_radius=0)
-        self.btn_max.pack(side="right")
-        mini = self._boton_icono(barra, I_MIN, self._minimizar, tam=10, ancho=44, alto=40)
-        mini.configure(corner_radius=0)
-        mini.pack(side="right")
+    def _dibujar_barra(self, s, w, h):
+        t, px = self.t, s.px
+        s.zona(0, 0, w, h, cursor="", presionar=self._inicio_arrastre, arrastrar=self._arrastrar,
+               doble=lambda: self._alternar_pantalla(self._pantalla or "max"))
+        logo = self.rec.imagen(("logo", px(22), t["acento"]), lambda: dibujar_logo(px(22), t["acento"], t["sobre"]))
+        s.create_image(px(12), h // 2, anchor="w", image=logo)
+        s.texto(px(42), h // 2, datos.APP, 13, True)
         compacto = self.a.ajustes["compacto"]
-        cmp_b = self._boton_icono(barra, I_EXPAND if compacto else I_COMPACT, self._alternar_compacto,
-                                  "Ver completo" if compacto else "Modo compacto", tam=11, ancho=44, alto=40)
-        cmp_b.configure(corner_radius=0)
-        cmp_b.pack(side="right")
-        for w in (barra, nombre, logo, self.lbl_aviso):
-            w.bind("<Button-1>", self._inicio_arrastre)
-            w.bind("<B1-Motion>", self._arrastrar)
-            w.bind("<Double-Button-1>", lambda _: self._alternar_pantalla(self._pantalla or "max"))
+        botones = ((I_CLOSE, self.cerrar, None, ROJO, 10),
+                   (I_RESTORE if self._pantalla else I_MAX, lambda: self._alternar_pantalla(self._pantalla or "max"),
+                    "Maximizar (F11: pantalla completa)", None, 10),
+                   (I_MIN, self._minimizar, None, None, 10),
+                   (I_EXPAND if compacto else I_COMPACT, self._alternar_compacto, "Ver completo" if compacto else "Modo compacto", None, 11))
+        x = w
+        for icono, fn, ayuda, hover, tam in botones:
+            x -= px(44)
+            s.boton(x, 0, px(44), h, icono, fn, icono=True, tam=tam, r=0, hover=hover, ayuda=ayuda)
+        inicio = px(42) + s.medir(datos.APP, 13, True) + px(12)
+        texto, color = self._aviso
+        if texto and x - inicio > px(40):
+            s.texto(inicio, h // 2, texto, 11, color=color or t["tenue"], ancho=x - inicio - px(8))
+
+    def _inicio_arrastre(self, *_):
+        px, py = self.root.winfo_pointerxy()
+        self._arrastre = (px - self.root.winfo_x(), py - self.root.winfo_y())
+
+    def _arrastrar(self, *_):
+        if self._pantalla or self._redim:
+            return
+        px, py = self.root.winfo_pointerxy()
+        tk.Tk.geometry(self.root, f"+{px - self._arrastre[0]}+{py - self._arrastre[1]}")
 
     def aviso(self, texto, color=None, ms=3500):
-        self.lbl_aviso.configure(text=texto, text_color=color or self.t["tenue"])
-        if getattr(self, "_aviso_tarea", None):
+        self._aviso = (texto, color)
+        self.barra.repintar()
+        if self._aviso_tarea:
             self.root.after_cancel(self._aviso_tarea)
-        self._aviso_tarea = self.root.after(ms, lambda: self.lbl_aviso.winfo_exists() and self.lbl_aviso.configure(text="")) if ms else None
+        self._aviso_tarea = self.root.after(ms, lambda: self.aviso("", ms=0)) if ms and texto else None
 
     def _alternar_compacto(self):
         if self._pantalla:
@@ -658,115 +695,110 @@ class App:
     def _construir_lateral(self):
         for w in self.lateral.winfo_children():
             w.destroy()
-        cab = ctk.CTkFrame(self.lateral, fg_color="transparent")
-        cab.pack(fill="x", padx=12, pady=(12, 0))
-        self._texto(cab, "PERFIL", 10, True, self.t["tenue"]).pack(anchor="w")
-        nombres = self._nombres_perfiles()
-        actual = next(n for n, pid in nombres.items() if pid == self.perfil["id"])
-        Selector(self, cab, list(nombres), actual, lambda n: self._cambiar_perfil(nombres[n]), alto=34,
-                 extra=[("+  Nuevo perfil", self._perfil_nuevo)]).pack(fill="x", pady=(2, 4))
-        acciones = ctk.CTkFrame(cab, fg_color="transparent")
-        acciones.pack(fill="x")
-        for icono, fn, ayuda in ((I_ADD, self._perfil_nuevo, "Nuevo perfil"), (I_EDIT, self._perfil_renombrar, "Renombrar"),
-                                 (I_COPY, self._perfil_duplicar, "Duplicar"), (I_DEL, self._perfil_eliminar, "Eliminar"),
-                                 (I_IMPORT, self._perfil_importar, "Importar archivo"), (I_EXPORT, self._perfil_exportar, "Exportar para compartir")):
-            self._boton_icono(acciones, icono, fn, ayuda, tam=11).pack(side="left", padx=(0, 4))
-
-        cab2 = ctk.CTkFrame(self.lateral, fg_color="transparent")
-        cab2.pack(fill="x", padx=12, pady=(14, 2))
-        self._texto(cab2, "MACROS", 10, True, self.t["tenue"]).pack(side="left")
-        self._texto(cab2, "arrastra para ordenar", 10, color=self.t["tenue"]).pack(side="left", padx=8)
-        self._boton_icono(cab2, I_ADD, lambda: self.ir_a("plantillas"), "Nueva macro", tam=11, ancho=26, alto=26,
-                          texto=self.t["acento"]).pack(side="right")
-
-        pie = ctk.CTkFrame(self.lateral, fg_color="transparent")
-        pie.pack(side="bottom", fill="x", padx=12, pady=12)
-        self.lbl_stats = self._texto(pie, "", 11, color=self.t["tenue"], justify="left", anchor="w")
-        self.lbl_stats.pack(fill="x", pady=(0, 8))
-        fila = ctk.CTkFrame(pie, fg_color="transparent")
-        fila.pack(fill="x")
-        self._boton(fila, "Detener todo", self.motor.detener_todo).pack(side="left", fill="x", expand=True, padx=(0, 6))
-        self._boton_icono(fila, I_GEAR, lambda: self.ir_a("ajustes"), "Ajustes", tam=14, ancho=34, alto=32,
-                          color=self.t["suave"], hover=self.t["borde"], texto=self.t["texto"]).pack(side="right")
-
-        self.lista = ctk.CTkScrollableFrame(self.lateral, fg_color="transparent", corner_radius=0,
-                                            scrollbar_button_color=self.t["borde"], scrollbar_button_hover_color=self.t["tenue"])
-        self.lista.pack(fill="both", expand=True, padx=(6, 2))
-        self.pintar_lista()
+        panel = self.t["panel"]
+        Escena(self.lateral, self, self._dibujar_lateral_arriba, fondo=panel, height=self.px(146)).pack(fill="x")
+        self.lat_pie = Escena(self.lateral, self, self._dibujar_lateral_abajo, fondo=panel, height=self.px(96))
+        self.lat_pie.pack(side="bottom", fill="x")
+        self.lista = Escena(self.lateral, self, self._dibujar_lista, fondo=panel, desplazable=True)
+        self.lista.pack(fill="both", expand=True)
+        self._estado_macros = self._id_stats = None
 
     def _nombres_perfiles(self):
         return {f"{p['nombre']}" + (f" ({i})" if any(q["nombre"] == p["nombre"] for q in self.a.perfiles[:i]) else ""): p["id"]
                 for i, p in enumerate(self.a.perfiles)}
 
-    def pintar_lista(self):
-        for w in self.lista.winfo_children():
-            w.destroy()
-        self.filas = {}
-        self._estado_filas = {}
-        if not self.macros:
-            self._texto(self.lista, "Sin macros todavía.\nCrea la primera con +", 12, color=self.t["tenue"]).pack(pady=30)
-        for m in self.macros:
-            self._fila_macro(m)
+    def _dibujar_lateral_arriba(self, s, w, h):
+        t, px = self.t, s.px
+        s.texto(px(12), px(20), "PERFIL", 10, True, t["tenue"])
+        nombres = self._nombres_perfiles()
+        actual = next(n for n, pid in nombres.items() if pid == self.perfil["id"])
+        s.selector(px(12), px(32), w - px(24), px(34), actual, list(nombres), lambda n: self._cambiar_perfil(nombres[n]),
+                   extra=[("+  Nuevo perfil", self._perfil_nuevo)])
+        x = px(12)
+        for icono, fn, ayuda in ((I_ADD, self._perfil_nuevo, "Nuevo perfil"), (I_EDIT, self._perfil_renombrar, "Renombrar"),
+                                 (I_COPY, self._perfil_duplicar, "Duplicar"), (I_DEL, self._perfil_eliminar, "Eliminar"),
+                                 (I_IMPORT, self._perfil_importar, "Importar archivo"), (I_EXPORT, self._perfil_exportar, "Exportar para compartir")):
+            s.boton(x, px(72), px(30), px(30), icono, fn, icono=True, tam=11, ayuda=ayuda)
+            x += px(34)
+        s.texto(px(12), px(128), "MACROS", 10, True, t["tenue"])
+        s.texto(px(20) + s.medir("MACROS", 10, True), px(128), "arrastra para ordenar", 10, color=t["tenue"])
+        s.boton(w - px(38), px(115), px(26), px(26), I_ADD, lambda: self.ir_a("plantillas"), icono=True, tam=11,
+                color_texto=t["acento"] if t["modo"] == "dark" else t["texto"], ayuda="Nueva macro")
 
-    def _fila_macro(self, m):
-        t = self.t
-        activa = m["id"] == self.sel and self.vista == "editor" and not self.a.ajustes["compacto"]
-        fila = ctk.CTkFrame(self.lista, fg_color=t["suave"] if activa else "transparent", corner_radius=8, height=48)
-        fila.pack(fill="x", pady=1, padx=(0, 4))
-        fila.pack_propagate(False)
-        punto = ctk.CTkFrame(fila, width=8, height=8, corner_radius=4, fg_color=t["borde"])
-        punto.pack(side="left", padx=(10, 8))
-        centro = ctk.CTkFrame(fila, fg_color="transparent")
-        centro.pack(side="left", fill="both", expand=True)
-        nombre = self._texto(centro, m["nombre"], 12, True, anchor="w", height=18)
-        nombre.pack(fill="x", pady=(6, 0))
-        tecla = ctk.CTkLabel(centro, text=m["tecla"] or "sin atajo", font=f_tecla(10), text_color=t["tenue"], anchor="w", height=14)
-        tecla.pack(fill="x")
-        boton = self._boton_icono(fila, I_PLAY, lambda: self._alternar_desde_ui(m), "Iniciar o detener", tam=11, ancho=30, alto=30)
-        boton.pack(side="right", padx=8)
-        self.filas[m["id"]] = dict(marco=fila, punto=punto, nombre=nombre, tecla=tecla, boton=boton)
-        for w in (fila, centro, nombre, tecla, punto):
-            w.bind("<ButtonPress-1>", lambda e, x=m: self._fila_presionar(e, x))
-            w.bind("<B1-Motion>", self._fila_arrastrar)
-            w.bind("<ButtonRelease-1>", self._fila_soltar)
+    def _dibujar_lista(self, s, w, h):
+        t, px = self.t, s.px
+        if not self.macros:
+            s.texto(w // 2, px(46), "Sin macros todavía.\nCrea la primera con +", 12, color=t["tenue"], ancla="center")
+            return 0
+        alto, paso = px(48), px(50)
+        mov = self._fila_mov if self._fila_mov and self._fila_mov["activo"] else None
+        for i, m in enumerate(self.macros):
+            y = i * paso
+            activa = m["id"] == self.sel and self.vista == "editor" and not self.a.ajustes["compacto"]
+            moviendo = bool(mov and mov["m"] is m)
+            on = self.motor.corriendo(m["id"])
+            pausa = on and self.motor.pausada(m["id"])
+            if activa or moviendo:
+                s.tarjeta(px(6), y, w - px(6), alto, t["suave"], 8, t["acento"] if moviendo else None)
+                s.zona(px(6), y, w - px(6), alto, presionar=lambda _, yy, m=m: self._fila_presionar(m, yy),
+                       arrastrar=self._fila_arrastrar, soltar=self._fila_soltar)
+            else:
+                # La fila normal no tiene fondo: aparece al pasar el mouse.
+                z = s.boton(px(6), y, w - px(6), alto, "", None, r=8, hover=mezclar(t["panel"], t["texto"], 0.05))
+                z.presionar, z.arrastrar, z.soltar = (lambda _, yy, m=m: self._fila_presionar(m, yy)), self._fila_arrastrar, self._fila_soltar
+            s.disco(px(20), y + alto // 2, px(8), AMBAR if pausa else t["acento"] if on else t["borde"])
+            s.texto(px(34), y + px(16), m["nombre"], 12, True, ancho=w - px(34) - px(48))
+            s.texto(px(34), y + px(33), m["tecla"] or "sin atajo", 10, True, t["tenue"], familia=MONO, ancho=w - px(34) - px(48))
+            s.boton(w - px(40), y + px(9), px(30), px(30), I_STOP if on else I_PLAY, lambda m=m: self._alternar_desde_ui(m), icono=True,
+                    tam=11, hover=t["borde"], color_texto=t["acento"] if on and t["modo"] == "dark" else None, ayuda="Iniciar o detener")
+            s.sobre = s.fondo
+        return len(self.macros) * paso
+
+    def _dibujar_lateral_abajo(self, s, w, h):
+        t, px = self.t, s.px
+        self._id_stats = s.texto(px(12), px(22), self._texto_stats(), 11, color=t["tenue"])
+        s.boton(px(12), px(52), w - px(64), px(32), "Detener todo", self.motor.detener_todo, color=t["suave"], hover=t["borde"])
+        s.boton(w - px(46), px(52), px(34), px(32), I_GEAR, lambda: self.ir_a("ajustes"), icono=True, tam=14, color=t["suave"],
+                hover=t["borde"], color_texto=t["texto"], ayuda="Ajustes")
+
+    def _texto_stats(self):
+        s = self.a.stats
+        horas = s["segundos"] / 3600
+        tiempo = f"{horas:.1f} h" if horas >= 1 else f"{s['segundos'] / 60:.0f} min"
+        return f"Te ahorraste {int(s['clicks']):,} clicks y {int(s['teclas']):,} teclas\nRelevo trabajó {tiempo} por ti".replace(",", ".")
+
+    def pintar_lista(self):
+        self.lista.repintar()
 
     # Un click selecciona; mantener y mover reordena.
-    def _fila_presionar(self, e, m):
-        self._fila_mov = dict(m=m, y0=e.y_root, activo=False)
+    def _fila_presionar(self, m, y):
+        self._fila_mov = dict(m=m, y0=y, activo=False)
 
-    def _fila_arrastrar(self, e):
-        a = getattr(self, "_fila_mov", None)
+    def _fila_arrastrar(self, _, y):
+        a, s = self._fila_mov, self.lista
         if not a:
             return
         if not a["activo"]:
-            if abs(e.y_root - a["y0"]) < 6 * self._escala():
+            if abs(y - a["y0"]) < self.px(6):
                 return
             a["activo"] = True
-            self.filas[a["m"]["id"]]["marco"].configure(border_width=1, border_color=self.t["acento"], fg_color=self.t["suave"])
-            tk.Tk.configure(self.root, cursor="fleur")
-        lienzo = self.lista._parent_canvas
-        y_lista = e.y_root - lienzo.winfo_rooty()
-        if y_lista < 20:
-            lienzo.yview_scroll(-1, "units")
-        elif y_lista > lienzo.winfo_height() - 20:
-            lienzo.yview_scroll(1, "units")
+            s.repintar()
+        vista = y - s.canvasy(0)
+        if vista < self.px(20):
+            s.yview_scroll(-self.px(8), "units")
+        elif vista > s.winfo_height() - self.px(20):
+            s.yview_scroll(self.px(8), "units")
         i = self.macros.index(a["m"])
-        for j, otra in enumerate(self.macros):
-            f = self.filas[otra["id"]]["marco"]
-            if j != i and f.winfo_rooty() <= e.y_root < f.winfo_rooty() + f.winfo_height():
-                self.macros.insert(j, self.macros.pop(i))
-                for x in self.macros:
-                    self.filas[x["id"]]["marco"].pack_forget()
-                for x in self.macros:
-                    self.filas[x["id"]]["marco"].pack(fill="x", pady=1, padx=(0, 4))
-                break
+        destino = min(max(int(y // self.px(50)), 0), len(self.macros) - 1)
+        if destino != i:
+            self.macros.insert(destino, self.macros.pop(i))
+            s.repintar()
 
-    def _fila_soltar(self, e):
-        a, self._fila_mov = getattr(self, "_fila_mov", None), None
+    def _fila_soltar(self, *_):
+        a, self._fila_mov = self._fila_mov, None
         if not a:
             return
         if a["activo"]:
-            tk.Tk.configure(self.root, cursor="")
             self._guardar_pronto()
             self.pintar_lista()
         else:
@@ -774,13 +806,7 @@ class App:
 
     def seleccionar(self, mid):
         self.sel = mid
-        self.vista = "editor"
-        if self.a.ajustes["compacto"]:
-            self.a.ajustes["compacto"] = False
-            self.construir()
-        else:
-            self.pintar_lista()
-            self.pintar_principal()
+        self.ir_a("editor")
 
     def ir_a(self, vista):
         self.vista = vista
@@ -804,14 +830,14 @@ class App:
 
     def _perfil_nuevo(self):
         def crear(nombre):
-            p = {"id": datos.nuevo_id(), "nombre": nombre, "macros": []}
+            p = {"id": datos.nuevo_id(), "nombre": nombre[:40], "macros": []}
             self.a.perfiles.append(p)
             self._cambiar_perfil(p["id"])
         self.dialogo("Nuevo perfil", "Un perfil agrupa las macros de una tarea.", crear, valor="Nuevo perfil")
 
     def _perfil_renombrar(self):
         def renombrar(nombre):
-            self.perfil["nombre"] = nombre
+            self.perfil["nombre"] = nombre[:40]
             self._guardar_pronto()
             self._construir_lateral()
         self.dialogo("Renombrar perfil", "", renombrar, valor=self.perfil["nombre"])
@@ -854,7 +880,11 @@ class App:
         ruta = filedialog.asksaveasfilename(parent=self.root, defaultextension=".json", initialfile=f"{self.perfil['nombre']}.relevo.json",
                                             filetypes=[("Perfil de Relevo", "*.json")])
         if ruta:
-            datos.exportar(self.perfil, ruta)
+            try:
+                datos.exportar(self.perfil, ruta)
+            except OSError as e:
+                self.aviso(f"No se pudo exportar: {e}", ROJO)
+                return
             self.aviso("Perfil exportado")
 
     def _perfil_importar(self):
@@ -876,7 +906,7 @@ class App:
         self._cerrar_menu()
         if self._dlg:
             self._dlg["cancelar"]()
-        t = self.t
+        t, px = self.t, self.px
         self.root.update_idletasks()
         foto = captura_ventana(self.hwnd)
         capa = tk.Label(self.root, bd=0, highlightthickness=0, bg=t["fondo"])
@@ -890,16 +920,6 @@ class App:
             capa.fotogramas = fotogramas
         capa.place(x=0, y=0, relwidth=1, relheight=1)
         capa.lift()
-        caja = ctk.CTkFrame(capa, fg_color=t["tarjeta"], bg_color=color_fondo, border_color=t["borde"], border_width=1, corner_radius=14)
-        caja.place(relx=.5, rely=.40, anchor="center")
-        self._texto(caja, titulo, 16, True).pack(anchor="w", padx=22, pady=(20, 2))
-        if texto:
-            self._texto(caja, texto, 12, color=t["tenue"], wraplength=300, justify="left").pack(anchor="w", padx=22)
-        campo = None
-        if valor is not None:
-            campo = ctk.CTkEntry(caja, width=300, height=36, font=fuente(12), **self._estilo_campo())
-            campo.insert(0, valor)
-            campo.pack(padx=22, pady=(12, 0))
 
         def cerrar():
             self._dlg = None
@@ -907,16 +927,36 @@ class App:
                 capa.destroy()
 
         def aceptar():
-            resultado = campo.get().strip() if campo else True
-            if campo and not resultado:
+            resultado = caja._campos["valor"].get().strip() if valor is not None else True
+            if valor is not None and not resultado:
                 return
             cerrar()
             al_aceptar(resultado)
-        botones = ctk.CTkFrame(caja, fg_color="transparent", width=300, height=34)
-        botones.pack(fill="x", padx=22, pady=(18, 20))
-        self._boton(botones, "Cancelar", cerrar, width=88, height=34).pack(side="right")
-        extra = dict(fg_color=ROJO, hover_color=mezclar(ROJO, "#000000", .2), text_color="#FFFFFF") if peligro else {}
-        self._boton(botones, confirmar, aceptar, primario=True, width=100, height=34, **extra).pack(side="right", padx=(0, 8))
+
+        def dibujar(s, w, _):
+            alto_texto = 0
+            if texto:
+                prueba = s.texto(0, 0, texto, 12, ancla="nw", envolver=w - px(44))
+                alto_texto = s.bbox(prueba)[3] + px(4)
+                s.delete(prueba)
+            total = px(54) + alto_texto + (px(48) if valor is not None else 0) + px(72)
+            s.tarjeta(0, 0, w, total, t["tarjeta"], 14, t["borde"])
+            s.texto(px(22), px(32), titulo, 16, True)
+            y = px(50)
+            if texto:
+                s.texto(px(22), y, texto, 12, color=t["tenue"], ancla="nw", envolver=w - px(44))
+                y += alto_texto
+            if valor is not None:
+                s.campo("valor", px(22), y + px(10), w - px(44), px(36), valor)
+                y += px(48)
+            y += px(18)
+            s.boton(w - px(22) - px(88), y, px(88), px(34), "Cancelar", cerrar, color=t["suave"], hover=t["borde"])
+            rojo = dict(color=ROJO, hover=mezclar(ROJO, "#000000", .2), color_texto="#FFFFFF") if peligro else {}
+            s.boton(w - px(22) - px(88) - px(8) - px(100), y, px(100), px(34), confirmar, aceptar, primario=True, **rojo)
+            return total
+        caja = Escena(capa, self, dibujar, fondo=color_fondo)
+        ancho = px(344)
+        caja.place(relx=.5, rely=.40, anchor="center", width=ancho, height=caja.medir_alto(ancho))
         capa.bind("<Button-1>", lambda _: cerrar())
         self._dlg = dict(aceptar=aceptar, cancelar=cerrar)
 
@@ -929,8 +969,8 @@ class App:
             if i < 2:
                 capa.after(16, lambda: animar(i + 1))
         animar()
-        if campo:
-            campo.after(40, lambda: campo.winfo_exists() and (campo.focus_force(), campo.select_range(0, "end")))
+        if valor is not None:
+            caja.after(40, lambda: caja.winfo_exists() and caja.enfocar("valor"))
         else:
             capa.focus_set()
 
@@ -941,243 +981,206 @@ class App:
             w.destroy()
         self.cancelar_captura()
         self._cerrar_menu()
-        self.pasos_ui = None
-        self.btn_probar = None
+        self.pasos_ui = self.cab = None
+        self._nombre_sucio = False
         if self.a.ajustes["compacto"]:
             return
         if self.vista == "plantillas":
-            self._vista_plantillas()
+            self._vista(self._dibujar_plantillas)
         elif self.vista == "ajustes":
-            self._vista_ajustes()
+            self._vista(self._dibujar_ajustes)
         elif self.vista == "registro" and self.macro:
             self._vista_registro()
         elif self.macro:
             self._vista_editor()
         else:
-            self._vista_vacia()
+            self._vista(self._dibujar_vacia)
 
-    def _vista_vacia(self):
-        caja = ctk.CTkFrame(self.principal, fg_color="transparent")
-        caja.place(relx=.5, rely=.42, anchor="center")
-        self._texto(caja, "Este perfil está vacío", 18, True).pack()
-        self._texto(caja, "Crea una macro y deja que tus manos descansen.", 12, color=self.t["tenue"]).pack(pady=(4, 14))
-        self._boton(caja, "Nueva macro", lambda: self.ir_a("plantillas"), primario=True).pack()
+    def _vista(self, dibujar):
+        Escena(self.principal, self, dibujar, desplazable=True).pack(fill="both", expand=True)
 
-    def _encabezado_vista(self, titulo, subtitulo):
-        cab = ctk.CTkFrame(self.principal, fg_color="transparent")
-        cab.pack(fill="x", padx=22, pady=(18, 10))
+    def _dibujar_vacia(self, s, w, h):
+        t, px = self.t, s.px
+        y = round(h * .42)
+        s.texto(w // 2, y - px(30), "Este perfil está vacío", 18, True, ancla="center")
+        s.texto(w // 2, y, "Crea una macro y deja que tus manos descansen.", 12, color=t["tenue"], ancla="center")
+        s.boton(w // 2 - px(60), y + px(24), px(120), px(32), "Nueva macro", lambda: self.ir_a("plantillas"), primario=True)
+
+    def _encabezado(self, s, titulo, subtitulo):
+        """Titulo de una vista, con flecha para volver al editor. Devuelve donde sigue el contenido."""
+        px, x = s.px, s.px(22)
         if self.macro:
-            self._boton_icono(cab, I_BACK, lambda: self.ir_a("editor"), "Volver", tam=13).pack(side="left", padx=(0, 8))
-        txt = ctk.CTkFrame(cab, fg_color="transparent")
-        txt.pack(side="left")
-        self._texto(txt, titulo, 19, True, anchor="w").pack(anchor="w")
-        self._texto(txt, subtitulo, 12, color=self.t["tenue"], anchor="w").pack(anchor="w")
+            s.boton(x, px(22), px(30), px(30), I_BACK, lambda: self.ir_a("editor"), icono=True, tam=13, ayuda="Volver")
+            x += px(38)
+        s.texto(x, px(30), titulo, 19, True)
+        s.texto(x, px(53), subtitulo, 12, color=self.t["tenue"])
+        return px(76)
 
-    def _vista_plantillas(self):
-        self._encabezado_vista("Nueva macro", "Elige un punto de partida. Todo se puede cambiar después.")
-        grid = ctk.CTkFrame(self.principal, fg_color="transparent")
-        grid.pack(fill="both", expand=True, padx=22)
-        grid.grid_columnconfigure((0, 1), weight=1, uniform="p")
+    def _dibujar_plantillas(self, s, w, h):
+        t, px = self.t, s.px
+        y0 = self._encabezado(s, "Nueva macro", "Elige un punto de partida. Todo se puede cambiar después.")
+        ancho, alto, sep = (w - px(44) - px(10)) // 2, px(92), px(10)
         for i, (nombre, desc, fabrica) in enumerate(PLANTILLAS):
-            tarjeta = ctk.CTkFrame(grid, fg_color=self.t["tarjeta"], corner_radius=10, border_width=1, border_color=self.t["borde"], height=92)
-            tarjeta.grid(row=i // 2, column=i % 2, sticky="ew", padx=5, pady=5)
-            tarjeta.pack_propagate(False)
-            a = self._texto(tarjeta, nombre, 14, True, anchor="w")
-            a.pack(fill="x", padx=16, pady=(14, 0))
-            b = self._texto(tarjeta, desc, 12, color=self.t["tenue"], anchor="w", justify="left", wraplength=290)
-            b.pack(fill="x", padx=16)
-            crear = lambda _=None, f=fabrica: self._crear_macro(f())
-            for w in (tarjeta, a, b):
-                w.bind("<Button-1>", crear)
-                w.configure(cursor="hand2")
-            tarjeta.bind("<Enter>", lambda _, c=tarjeta: c.configure(border_color=self.t["acento"]))
-            tarjeta.bind("<Leave>", lambda _, c=tarjeta: c.configure(border_color=self.t["borde"]))
+            x, y = px(22) + (i % 2) * (ancho + sep), y0 + (i // 2) * (alto + sep)
+            k = s.caja(x, y, ancho, alto, t["tarjeta"], 10, t["borde"])
+            s.texto(x + px(16), y + px(28), nombre, 14, True)
+            s.texto(x + px(16), y + px(42), desc, 12, color=t["tenue"], ancla="nw", envolver=ancho - px(32))
+            s.zona(x, y, ancho, alto, clic=lambda f=fabrica: self._crear_macro(f()),
+                   entrar=lambda k=k: s.recolorear(k, t["tarjeta"], t["acento"]), salir=lambda k=k: s.recolorear(k, t["tarjeta"], t["borde"]))
+        return y0 + ((len(PLANTILLAS) + 1) // 2) * (alto + sep) + px(8)
 
     def _crear_macro(self, m):
         usados = {x["tecla"] for x in self.macros}
         if m["tecla"] in usados:
             m["tecla"] = ""
         self.macros.append(m)
+        self._aplicar_motor()
         self.seleccionar(m["id"])
         self._guardar_pronto()
 
     # -------------------------------------------------------------- editor
     def _vista_editor(self):
         m = self.macro
-        t = self.t
-        cab = ctk.CTkFrame(self.principal, fg_color="transparent")
-        cab.pack(fill="x", padx=22, pady=(16, 8))
-        nombre = ctk.CTkEntry(cab, font=fuente(17, True), height=36, width=270, fg_color="transparent", border_width=1, border_color=t["borde"], text_color=t["texto"])
-        nombre.insert(0, m["nombre"])
-        nombre.pack(side="left")
-        boton_nombre = self._boton(cab, "Guardar", None, width=74, height=30, font=fuente(11, True))
-        boton_nombre.pack(side="left", padx=(8, 0))
+        px = self.px
+        self.cab = Escena(self.principal, self, lambda s, w, h: self._dibujar_cabecera(s, w, m), height=px(232))
+        self.cab.pack(fill="x")
+        Escena(self.principal, self, self._dibujar_botones_paso, height=px(88)).pack(side="bottom", fill="x")
+        self.pasos_ui = ListaPasos(self.principal, self, m)
+        self.pasos_ui.pack(fill="both", expand=True, padx=(px(22), px(14)))
 
-        def revisar(_=None):
-            pendiente = nombre.get().strip() != m["nombre"]
-            boton_nombre.configure(state="normal" if pendiente else "disabled", text_color_disabled=t["tenue"],
-                                   fg_color=t["acento"] if pendiente else t["suave"], hover_color=t["hover"] if pendiente else t["suave"],
-                                   text_color=t["sobre"] if pendiente else t["tenue"])
+    def _dibujar_cabecera(self, s, w, m):
+        """Nombre, botones de la macro y la tarjeta con sus ajustes."""
+        t, px = self.t, s.px
+        clave = ("nombre", m["id"])
+
+        def cambio(v):
+            sucio = v.strip() != m["nombre"]
+            if sucio != self._nombre_sucio:
+                self._nombre_sucio = sucio
+                s.repintar()
 
         def guardar(_=None):
-            valor = nombre.get().strip()
+            valor = campo.get().strip()
             if not valor:
-                nombre.insert(0, m["nombre"])
+                s.fijar_campo(clave, m["nombre"])
             elif valor != m["nombre"]:
                 self._cambiar_nombre(m, valor)
                 self.aviso("Nombre guardado")
-            revisar()
+            self._nombre_sucio = False
             self.root.focus_set()
+            s.repintar()
 
         def confirmar_sin_aviso():
             # Cambiar de vista sin pulsar Guardar no debe perder lo escrito.
-            valor = nombre.get().strip()
+            valor = campo.get().strip()
             if valor and valor != m["nombre"]:
                 self._cambiar_nombre(m, valor)
-        self._nombre_pendiente = (nombre, confirmar_sin_aviso)
-        boton_nombre.configure(command=guardar)
-        nombre.bind("<KeyRelease>", revisar)
-        nombre.bind("<Return>", guardar, add="+")
-        nombre.bind("<Button-1>", lambda _: nombre.focus_force(), add="+")
-        revisar()
-        self.btn_probar = self._boton(cab, "", lambda: self._alternar_desde_ui(m), primario=True, width=112, height=34)
-        self.btn_probar.pack(side="right", padx=(8, 0))
+        campo = s.campo(clave, px(22), px(16), px(270), px(36), m["nombre"], cambio, al_enter=guardar, tam=17, negrita=True, fondo=t["fondo"])
+        self._nombre_pendiente = (campo, confirmar_sin_aviso)
+        if self._nombre_sucio:
+            s.boton(px(300), px(19), px(74), px(30), "Guardar", guardar, primario=True, tam=11)
+        else:
+            s.caja(px(300), px(19), px(74), px(30), t["suave"], 7)
+            s.texto(px(337), px(34), "Guardar", 11, True, t["tenue"], ancla="center")
+
+        on = self.motor.corriendo(m["id"])
+        rojo = dict(color=ROJO, hover=mezclar(ROJO, "#000000", .15), color_texto="#FFFFFF") if on else {}
+        x = w - px(22) - px(112)
+        s.boton(x, px(17), px(112), px(34), "Detener" if on else "Iniciar", lambda: self._alternar_desde_ui(m), primario=True, **rojo)
         for icono, fn, ayuda in ((I_DEL, self._macro_eliminar, "Eliminar macro"), (I_COPY, self._macro_duplicar, "Duplicar macro"),
                                  (I_LOG, lambda: self.ir_a("registro"), "Ver registro de esta macro")):
-            self._boton_icono(cab, icono, fn, ayuda, tam=12, ancho=32, alto=32).pack(side="right", padx=(2, 0))
+            x -= px(36)
+            s.boton(x, px(18), px(32), px(32), icono, fn, icono=True, ayuda=ayuda)
 
-        self._tarjeta_ajustes_macro(m)
+        cx, cy, cw, ch = px(22), px(60), w - px(44), px(124)
+        s.tarjeta(cx, cy, cw, ch, t["tarjeta"], 10)
+        col = cw / 3
+        f1, f2 = cy + px(19), cy + px(77)       # renglones de etiquetas
+        c1, c2 = cy + px(31), cy + px(89)       # renglones de controles
 
-        cab2 = ctk.CTkFrame(self.principal, fg_color="transparent")
-        cab2.pack(fill="x", padx=22, pady=(12, 4))
-        self._texto(cab2, "PASOS", 10, True, t["tenue"]).pack(side="left")
-        self._texto(cab2, "se ejecutan en orden y luego vuelven a empezar", 11, color=t["tenue"]).pack(side="left", padx=8)
-        self.btn_grabar = self._boton(cab2, "Grabar acciones", self._alternar_grabacion, height=28, font=fuente(11, True))
-        self.btn_grabar.pack(side="right")
+        def celda(i):
+            return cx + round(col * i) + px(14), round(col) - px(28)
 
-        rejilla = ctk.CTkFrame(self.principal, fg_color="transparent")
-        rejilla.pack(side="bottom", fill="x", padx=22, pady=(6, 14))
-        rejilla.grid_columnconfigure(tuple(range(5)), weight=1, uniform="a")
-        for i, (tipo, (titulo, icono, desc, _)) in enumerate(PASOS.items()):
-            b = ctk.CTkButton(rejilla, text=f"{icono}", font=f_icono(12), width=30, height=30, fg_color=t["tarjeta"], hover_color=t["suave"],
-                              text_color=t["acento"], corner_radius=7, anchor="w", command=lambda x=tipo: self._agregar_paso(x))
-            b.configure(text=f"+  {titulo}", font=fuente(11, True), text_color=t["texto"])
-            b.grid(row=i // 5, column=i % 5, sticky="ew", padx=2, pady=2)
-            Aviso(b, desc, t)
-
-        self.pasos_ui = ListaPasos(self.principal, self, m)
-        self.pasos_ui.pack(fill="both", expand=True, padx=(22, 14))
-
-    def _tarjeta_ajustes_macro(self, m):
-        t = self.t
-        c = ctk.CTkFrame(self.principal, fg_color=t["tarjeta"], corner_radius=10)
-        c.pack(fill="x", padx=22)
-        c.grid_columnconfigure((0, 1, 2), weight=1, uniform="c")
-
-        def celda(col, fila, titulo):
-            f = ctk.CTkFrame(c, fg_color="transparent")
-            f.grid(row=fila, column=col, sticky="ew", padx=14, pady=(10 if fila == 0 else 2, 10 if fila else 2))
-            self._texto(f, titulo, 11, color=t["tenue"], anchor="w", height=18).pack(fill="x")
-            return f
-
-        f = celda(0, 0, "Atajo global")
-        fila = ctk.CTkFrame(f, fg_color="transparent")
-        fila.pack(fill="x")
+        x, a = celda(0)
+        s.texto(x, f1, "Atajo global", 11, color=t["tenue"])
+        conflicto = self._conflicto(m)
+        if conflicto:
+            ini = x + s.medir("Atajo global", 11) + px(8)
+            s.texto(ini, f1, conflicto, 10, color=AMBAR, ancho=x + a - ini)
 
         def fijar_tecla(combo):
             m["tecla"] = combo
             self._aplicar_motor()
             self._guardar_pronto()
-            if m["id"] in self.filas:
-                self.filas[m["id"]]["tecla"].configure(text=combo or "sin atajo")
-            self._revisar_conflicto(m)
-        self._captura(fila, lambda: m["tecla"], fijar_tecla, vacio="Sin atajo").pack(side="left", fill="x", expand=True)
-        self._boton_icono(fila, I_CLOSE, lambda: self._limpiar_tecla(fijar_tecla), "Quitar atajo", tam=9, ancho=28, alto=30).pack(side="left", padx=(4, 0))
-        self.lbl_conflicto = self._texto(f, "", 10, color=AMBAR, anchor="w", height=14)
+            self.pintar_lista()
+        self._boton_captura(s, ("atajo", m["id"]), x, c1, a - px(32), px(30), lambda: m["tecla"], fijar_tecla, vacio="Sin atajo")
+        s.boton(x + a - px(28), c1, px(28), px(30), I_CLOSE, lambda: (self.cancelar_captura(), fijar_tecla(""), s.repintar()),
+                icono=True, tam=9, ayuda="Quitar atajo")
+        s.texto(x, f2, "Variación natural", 11, color=t["tenue"])
+        s.deslizador(x, c2 + px(15), a, m["variacion"], 0, 50, lambda v: self._fijar(m, "variacion", v), lambda v: f"±{v:.0f}%", paso=1, tipo=int)
 
-        f = celda(1, 0, "Al pulsar el atajo")
-        etiquetas = {"Alternar": "alternar", "Mantener": "mantener", "Una vez": "una_vez"}
-        seg = self._segmentado(f, list(etiquetas), lambda v: self._cambiar_modo(m, etiquetas[v]))
-        seg.set(next(k for k, v in etiquetas.items() if v == m["modo"]))
-        seg.pack(fill="x")
+        x, a = celda(1)
+        s.texto(x, f1, "Al pulsar el atajo", 11, color=t["tenue"])
+        s.segmentado(x, c1, a, px(30), MODOS_CORTOS, m["modo"], lambda v: (self._cambiar_modo(m, v), s.repintar()))
+        s.texto(x, f2, "Velocidad de toda la macro", 11, color=t["tenue"])
+        s.deslizador(x, c2 + px(15), a, m["velocidad"], 0.25, 4, lambda v: self._fijar(m, "velocidad", v), lambda v: f"×{v:.2f}", paso=0.05)
 
-        f = ctk.CTkFrame(c, fg_color="transparent")
-        f.grid(row=0, column=2, sticky="ew", padx=14, pady=(10, 2))
-        f.grid_columnconfigure(0, weight=3, uniform="r")
-        f.grid_columnconfigure(1, weight=2, uniform="r")
-        self._texto(f, "Veces (0 = sin fin)", 11, color=t["tenue"], anchor="w", height=18).grid(row=0, column=0, sticky="ew")
-        etiqueta = self._texto(f, "Inicia en (s)", 11, color=t["tenue"], anchor="w", height=18)
-        etiqueta.grid(row=0, column=1, sticky="ew", padx=(8, 0))
-        self._num(f, m, "repeticiones", int, 0, 1000000, ancho=60).grid(row=1, column=0, sticky="ew")
-        cuenta = self._num(f, m, "cuenta", int, 0, 3600, ancho=50)
-        cuenta.grid(row=1, column=1, sticky="ew", padx=(8, 0))
-        ayuda = "Cuenta atrás al iniciar desde la ventana (0 = al instante). Con el atajo siempre empieza al instante."
-        Aviso(etiqueta, ayuda, t)
-        Aviso(cuenta, ayuda, t)
+        x, a = celda(2)
+        a1 = round((a - px(8)) * 0.6)
+        s.texto(x, f1, "Veces (0 = sin fin)", 11, color=t["tenue"], ancho=a1)
+        self._num(s, x, c1, a1, px(30), m, "repeticiones", int, 0, 1000000)
+        x2, a2 = x + a1 + px(8), a - a1 - px(8)
+        s.texto(x2, f1, "Inicia en (s)", 11, color=t["tenue"], ancho=a2)
+        self._num(s, x2, c1, a2, px(30), m, "cuenta", int, 0, 3600)
+        s.zona(x2, f1 - px(9), a2, px(18), cursor="",
+               ayuda="Cuenta atrás al iniciar desde la ventana (0 = al instante). Con el atajo siempre empieza al instante.")
+        s.texto(x, f2, "Solo si la ventana se llama", 11, color=t["tenue"])
+        s.campo(("ventana", m["id"]), x, c2, a, px(30), m["ventana"], lambda v: self._fijar(m, "ventana", v), marcador="cualquier ventana")
 
-        f = celda(0, 1, "Variación natural")
-        self._deslizador(f, m, "variacion", 0, 50, lambda v: f"±{v:.0f}%", paso=1, tipo=int).pack(fill="x")
-        f = celda(1, 1, "Velocidad de toda la macro")
-        self._deslizador(f, m, "velocidad", 0.25, 4, lambda v: f"×{v:.2f}", paso=0.05).pack(fill="x")
-        f = celda(2, 1, "Solo si la ventana se llama")
-        e = ctk.CTkEntry(f, height=30, font=fuente(12), placeholder_text="cualquier ventana", **self._estilo_campo())
-        if m["ventana"]:
-            e.insert(0, m["ventana"])
-        self._vincular(e, lambda v: self._fijar(m, "ventana", v))
-        e.pack(fill="x")
-        self._revisar_conflicto(m)
+        y = cy + ch + px(26)
+        s.sobre = s.fondo
+        s.texto(px(22), y, "PASOS", 10, True, t["tenue"])
+        s.texto(px(30) + s.medir("PASOS", 10, True), y, "se ejecutan en orden y luego vuelven a empezar", 11, color=t["tenue"])
+        if self.motor.grabando:
+            s.boton(w - px(22) - px(150), y - px(14), px(150), px(28), "Terminar grabación", self._alternar_grabacion, tam=11,
+                    color=ROJO, hover=mezclar(ROJO, "#000000", .15), color_texto="#FFFFFF")
+        else:
+            s.boton(w - px(22) - px(130), y - px(14), px(130), px(28), "Grabar acciones", self._alternar_grabacion, tam=11,
+                    color=t["suave"], hover=t["borde"])
+        return px(232)
 
-    def _estilo_campo(self):
-        return dict(fg_color=self.t["panel"], border_color=self.t["borde"], border_width=1, text_color=self.t["texto"],
-                    placeholder_text_color=self.t["tenue"], corner_radius=6)
+    def _dibujar_botones_paso(self, s, w, h):
+        """Un boton por cada tipo de paso que se puede agregar."""
+        t, px = self.t, s.px
+        sep = px(4)
+        ancho = (w - px(44) - 4 * sep) / 5
+        for i, (tipo, (titulo, _, desc, _)) in enumerate(PASOS.items()):
+            x = px(22) + round((i % 5) * (ancho + sep))
+            s.boton(x, px(6) + (i // 5) * px(34), round(ancho), px(30), f"+  {titulo}", lambda x=tipo: self._agregar_paso(x),
+                    color=t["tarjeta"], tam=11, izquierda=True, ayuda=desc)
 
-    def _segmentado(self, padre, valores, comando):
-        t = self.t
-        # CustomTkinter usa un solo color de texto: el seleccionado va atenuado para que se lea.
-        seleccion = mezclar(t["acento"], t["panel"], 0.55)
-        return ctk.CTkSegmentedButton(padre, values=valores, command=comando, height=30, font=fuente(11, True),
-                                      fg_color=t["panel"], selected_color=seleccion, selected_hover_color=seleccion,
-                                      unselected_color=t["panel"], unselected_hover_color=t["suave"], text_color=t["texto"],
-                                      text_color_disabled=t["tenue"], corner_radius=6)
-
-    def _fijar(self, obj, clave, valor):
-        obj[clave] = valor
-        self._guardar_pronto()
-
-    def _limpiar_tecla(self, fijar):
-        self.cancelar_captura()
-        fijar("")
-        self.pintar_principal()
+    def _conflicto(self, m):
+        tecla = m["tecla"].upper()
+        if not tecla:
+            return ""
+        aj = self.a.ajustes
+        otra = next((x["nombre"] for x in self.macros if x is not m and x["tecla"].upper() == tecla), None)
+        if otra:
+            return f"también lo usa \"{otra}\""
+        if tecla == aj["tecla_detener"].upper():
+            return "choca con Detener todo"
+        if tecla == aj["tecla_cerrar"].upper():
+            return "choca con Cerrar"
+        return ""
 
     def _cambiar_nombre(self, m, v):
         m["nombre"] = v[:60] or "Macro"
-        if m["id"] in self.filas:
-            self.filas[m["id"]]["nombre"].configure(text=m["nombre"])
+        self.pintar_lista()
         self._guardar_pronto()
 
     def _cambiar_modo(self, m, modo):
         self.motor.detener(m["id"])
         self._fijar(m, "modo", modo)
-
-    def _revisar_conflicto(self, m):
-        lbl = getattr(self, "lbl_conflicto", None)
-        if not lbl or not lbl.winfo_exists():
-            return
-        tecla, msg = m["tecla"].upper(), ""
-        if tecla:
-            aj = self.a.ajustes
-            otra = next((x["nombre"] for x in self.macros if x is not m and x["tecla"].upper() == tecla), None)
-            if otra:
-                msg = f"También lo usa \"{otra}\""
-            elif tecla == aj["tecla_detener"].upper():
-                msg = "Choca con Detener todo"
-            elif tecla == aj["tecla_cerrar"].upper():
-                msg = "Choca con Cerrar"
-        lbl.configure(text=msg)
-        if msg:
-            lbl.pack(fill="x")
-        else:
-            lbl.pack_forget()
 
     # --------------------------------------------------------------- pasos
     def pintar_pasos(self):
@@ -1185,192 +1188,195 @@ class App:
             self.pasos_ui.reconstruir()
 
     def _editor_paso(self, padre, p):
-        """Campos del paso abierto. Es lo unico de la lista hecho con widgets reales."""
-        f = ctk.CTkFrame(padre, fg_color=self.t["tarjeta"], corner_radius=0)
-        cuerpo = ctk.CTkFrame(f, fg_color="transparent")
-        cuerpo.pack(fill="x", pady=(0, 6))
-        getattr(self, "_campos_" + p["tipo"])(cuerpo, p)
-        if p["tipo"] != "repetir":
-            fila = ctk.CTkFrame(f, fg_color="transparent")
-            fila.pack(fill="x")
-            self._etq(fila, "Probabilidad de que ocurra (%)")
-            self._num(fila, p, "prob", int, 0, 100, ancho=48).pack(side="left")
-        return f
-
-    def _etq(self, padre, texto, izq=0):
-        self._texto(padre, texto, 11, color=self.t["tenue"]).pack(side="left", padx=(izq, 5))
-
-    def _rango(self, padre, p, etiqueta="Dura entre", izq=0):
-        self._etq(padre, etiqueta, izq)
-        self._num(padre, p, "min", float, 0, 86400).pack(side="left")
-        self._etq(padre, "y", 5)
-        self._num(padre, p, "max", float, 0, 86400).pack(side="left")
-        self._etq(padre, "segundos", 5)
+        """Campos del paso abierto, dentro de su fila en la lista."""
+        def dibujar(s, w, _):
+            f = Flujo(self, s, w)
+            getattr(self, "_campos_" + p["tipo"])(f, p)
+            if p["tipo"] != "repetir":
+                f.salto()
+                f.etq("Probabilidad de que ocurra (%)")
+                f.num(p, "prob", int, 0, 100, 48)
+            return f.fin()
+        return Escena(padre, self, dibujar, fondo=self.t["tarjeta"])
 
     def _campos_click(self, f, p):
-        self._etq(f, "Botón")
-        Selector(self, f, entrada.BOTONES_MOUSE, p["boton"], lambda v: self._fijar(p, "boton", v), ancho=118, alto=28, fondo=self.t["panel"]).pack(side="left")
-        self._etq(f, "Veces", 12)
-        self._num(f, p, "veces", int, 1, 10000).pack(side="left")
-        self._etq(f, "Por segundo", 12)
-        self._deslizador(f, p, "cps", 0, 30, lambda v: f"{v:.1f}" if v > 0 else "sin pausa", paso=0.5).pack(side="left", fill="x", expand=True)
+        s = f.s
+        f.etq("Botón")
+        x, y = f.hueco(s.px(118))
+        s.selector(x, y, s.px(118), s.px(28), p["boton"], entrada.BOTONES_MOUSE, lambda v: self._fijar(p, "boton", v), fondo=self.t["panel"])
+        f.etq("Veces", 6)
+        f.num(p, "veces", int, 1, 10000)
+        f.etq("Por segundo", 6)
+        s.deslizador(f.x, f.medio, f.resto, p["cps"], 0, 30, lambda v: self._fijar(p, "cps", v),
+                     lambda v: f"{v:.1f}" if v > 0 else "sin pausa", paso=0.5)
 
     def _campos_tecla(self, f, p):
-        self._captura(f, lambda: p["teclas"], lambda c: self._fijar(p, "teclas", c or p["teclas"]), ancho=130).pack(side="left", padx=(0, 12))
-        self._rango(f, p, "Mantener entre")
-        self._etq(f, "(0 = toque)", 2)
+        s = f.s
+        x, y = f.hueco(s.px(130))
+        self._boton_captura(s, ("tecla", id(p)), x, y, s.px(130), s.px(28), lambda: p["teclas"], lambda c: self._fijar(p, "teclas", c or p["teclas"]))
+        f.rango(p, "Mantenerla entre", final="segundos (0 = un toque)")
 
     def _campos_aleatoria(self, f, p):
-        self._etq(f, "Teclas")
-        e = ctk.CTkEntry(f, width=150, height=28, font=f_tecla(11), **self._estilo_campo())
-        e.insert(0, p["lista"])
+        s = f.s
+        f.etq("Teclas")
+        clave = ("lista", id(p))
+
+        def malas(v):
+            return not v.strip() or any(not entrada.es_valida(x) for x in v.replace(",", " ").split())
 
         def cambiar(v):
             self._fijar(p, "lista", v)
-            malas = [x for x in v.replace(",", " ").split() if not entrada.es_valida(x)]
-            e.configure(border_color=ROJO if malas or not v.strip() else self.t["borde"])
-        self._vincular(e, cambiar)
-        e.pack(side="left", padx=(0, 12))
-        self._rango(f, p)
+            s.error_campo(clave, malas(v))
+        x, y = f.hueco(s.px(150))
+        s.campo(clave, x, y, s.px(150), s.px(28), p["lista"], cambiar, familia=MONO, negrita=True, tam=11, error=malas(p["lista"]))
+        f.rango(p, "Dura entre")
+
+    def _campos_patron(self, f, p):
+        s, t = f.s, self.t
+        clave = ("patron", id(p))
+
+        def estado(v):
+            errores = patron.leer(v)[1]
+            return (" · ".join(errores), AMBAR) if errores else (AYUDA_PATRON, t["tenue"])
+
+        def cambiar(v):
+            self._fijar(p, "patron", v)
+            texto, color = estado(v)
+            s.itemconfigure(nota, text=self.rec.cortar(texto, f.ancho, self.rec.fuente(LETRA, s.px(11))), fill=color)
+            s.error_campo(clave, color == AMBAR)
+        f.etq("Teclas y tiempos")
+        texto, color = estado(p["patron"])
+        s.campo(clave, f.x, f.y + s.px(3), f.resto, s.px(28), p["patron"], cambiar, familia=MONO, negrita=True, tam=11, error=color == AMBAR)
+        f.salto()
+        nota = s.texto(0, f.y + s.px(12), texto, 11, color=color, ancho=f.ancho)
+        f.y += s.px(26)
+        f.x = 0
+        f.etq("Orden")
+        nombres = {v: k for k, v in patron.ORDENES.items()}
+        x, y = f.hueco(s.px(140))
+        s.selector(x, y, s.px(140), s.px(28), patron.ORDENES[p["orden"]], list(nombres), lambda n: self._fijar(p, "orden", nombres[n]),
+                   fondo=t["panel"])
+        f.etq("Repetir el patrón", 6)
+        f.num(p, "veces", int, 1, 10000)
+        f.etq("veces por pasada")
+        f.salto()
+        f.rango(p, "Las teclas sin tiempo propio duran entre", final="segundos (0 = un toque)")
+        f.salto()
+        f.rango(p, "Pausa entre una tecla y la siguiente: entre", "pausa_min", "pausa_max")
 
     def _campos_espera(self, f, p):
-        self._rango(f, p, "Entre")
+        f.rango(p, "Entre")
 
     def _campos_estado(self, f, p):
-        seg = self._segmentado(f, ["Presionar", "Soltar"], lambda v: self._fijar(p, "accion", v.lower()))
-        seg.set(p["accion"].capitalize())
-        seg.pack(side="left", padx=(0, 12))
-        b = self._captura(f, lambda: p["objetivo"], lambda c: self._fijar(p, "objetivo", c.split("+")[-1] if c else p["objetivo"]), ancho=120)
-        b.pack(side="left")
-
-        def elegir(v):
-            self._fijar(p, "objetivo", v)
-            b.configure(text=v)
-        Selector(self, f, entrada.BOTONES_MOUSE, "o mouse", elegir, ancho=110, alto=28, fondo=self.t["panel"]).pack(side="left", padx=(8, 0))
+        s = f.s
+        x, y = f.hueco(s.px(170))
+        s.segmentado(x, y, s.px(170), s.px(28), {"Presionar": "presionar", "Soltar": "soltar"}, p["accion"],
+                     lambda v: (self._fijar(p, "accion", v), s.repintar()))
+        x, y = f.hueco(s.px(120))
+        self._boton_captura(s, ("objetivo", id(p)), x, y, s.px(120), s.px(28), lambda: p["objetivo"],
+                            lambda c: self._fijar(p, "objetivo", c.split("+")[-1] if c else p["objetivo"]))
+        x, y = f.hueco(s.px(110))
+        s.selector(x, y, s.px(110), s.px(28), "o mouse", entrada.BOTONES_MOUSE, lambda v: self._fijar(p, "objetivo", v), fondo=self.t["panel"])
 
     def _campos_mouse(self, f, p):
-        self._etq(f, "X")
-        cx = self._num(f, p, "x", int, -100000, 100000, ancho=70)
-        cx.pack(side="left")
-        self._etq(f, "Y", 8)
-        cy = self._num(f, p, "y", int, -100000, 100000, ancho=70)
-        cy.pack(side="left")
-        sw = ctk.CTkSwitch(f, text="Relativo a donde está", font=fuente(11), text_color=self.t["tenue"], switch_width=30, switch_height=15,
-                           progress_color=self.t["acento"], fg_color=self.t["borde"], command=lambda: self._fijar(p, "relativo", not p["relativo"]))
-        if p["relativo"]:
-            sw.select()
-        sw.pack(side="left", padx=12)
+        s = f.s
+        f.etq("X")
+        f.num(p, "x", int, -100000, 100000, 70)
+        f.etq("Y", 4)
+        f.num(p, "y", int, -100000, 100000, 70)
+        x, _ = f.hueco(s.px(34))
+        s.interruptor(x + s.px(38), f.medio, p["relativo"], lambda: (self._fijar(p, "relativo", not p["relativo"]), s.repintar()))
+        f.etq("Relativo a donde está", 6)
 
-        def capturar(boton, n=3):
-            if not boton.winfo_exists():
+        def capturar(n=3):
+            if not s.winfo_exists():
+                self._apuntando = None
                 return
             if n > 0:
-                boton.configure(text=f"Apunta... {n}")
-                self.root.after(1000, lambda: capturar(boton, n - 1))
+                self._apuntando = (id(p), n)
+                s.repintar()
+                self.root.after(1000, lambda: capturar(n - 1))
                 return
-            x, y = entrada.posicion_mouse()
-            p["x"], p["y"], p["relativo"] = x, y, False
+            self._apuntando = None
+            p["x"], p["y"], p["relativo"] = *entrada.posicion_mouse(), False
             self._guardar_pronto()
             self.pintar_pasos()
-        b = self._boton(f, "Capturar punto", None, height=28, font=fuente(11, True), width=110)
-        b.configure(command=lambda: capturar(b))
-        b.pack(side="left")
+        contando = self._apuntando and self._apuntando[0] == id(p)
+        x, y = f.hueco(s.px(116))
+        s.boton(x + s.px(6), y, s.px(110), s.px(28), f"Apunta... {self._apuntando[1]}" if contando else "Capturar punto",
+                None if contando else capturar, tam=11, color=self.t["suave"], hover=self.t["borde"])
 
     def _campos_rueda(self, f, p):
-        self._etq(f, "Muescas")
-        self._num(f, p, "muescas", int, -100, 100).pack(side="left")
-        self._etq(f, "positivo sube, negativo baja", 8)
+        f.etq("Muescas")
+        f.num(p, "muescas", int, -100, 100)
+        f.etq("positivo sube, negativo baja", 4)
 
     def _campos_texto(self, f, p):
-        e = ctk.CTkEntry(f, height=28, font=fuente(12), **self._estilo_campo())
-        e.insert(0, p["texto"])
-        self._vincular(e, lambda v: self._fijar(p, "texto", v))
-        e.pack(side="left", fill="x", expand=True)
-        self._etq(f, "Letras por segundo", 12)
-        self._num(f, p, "cps", float, 0, 100).pack(side="left")
+        s = f.s
+        ancho = f.resto - s.medir("Letras por segundo", 11) - s.px(56 + 30)
+        x, y = f.hueco(ancho)
+        s.campo(("texto", id(p)), x, y, ancho, s.px(28), p["texto"], lambda v: self._fijar(p, "texto", v))
+        f.etq("Letras por segundo", 6)
+        f.num(p, "cps", float, 0, 100)
 
     def _campos_repetir(self, f, p):
-        self._etq(f, "Volver")
-        self._num(f, p, "atras", int, 1, 1000).pack(side="left")
-        self._etq(f, "pasos atrás y repetirlos", 5)
-        self._num(f, p, "veces", int, 1, 10000).pack(side="left")
-        self._etq(f, "veces más", 5)
+        f.etq("Volver")
+        f.num(p, "atras", int, 1, 1000)
+        f.etq("pasos atrás y repetirlos")
+        f.num(p, "veces", int, 1, 10000)
+        f.etq("veces más")
 
     def _agregar_paso(self, tipo):
         self.pasos_ui.agregar(datos.nuevo_paso(tipo))
         self._guardar_pronto()
 
     # ----------------------------------------------------- campos genericos
-    def _vincular(self, campo, fn):
-        campo.bind("<KeyRelease>", lambda _: fn(campo.get()))
-        campo.bind("<FocusOut>", lambda _: fn(campo.get()), add="+")
-        campo.bind("<Button-1>", lambda _: campo.focus_force(), add="+")
+    def _num(self, s, x, y, w, h, obj, clave, tipo, minimo, maximo):
+        """Campo para un numero: guarda mientras escribes y lo acomoda al salir."""
+        k = ("num", id(obj), clave)
 
-    def _num(self, padre, obj, clave, tipo, minimo, maximo, ancho=56, alto=28):
-        e = ctk.CTkEntry(padre, width=ancho, height=alto, font=fuente(12), justify="center", **self._estilo_campo())
-        formato = lambda v: f"{v:g}"
-        e.insert(0, formato(obj[clave]))
-
-        def escribir(_=None):
+        def escribir(v):
             try:
-                v = tipo(float(e.get().replace(",", ".")))
-            except ValueError:
+                n = tipo(float(v.replace(",", ".")))
+            except (ValueError, OverflowError):
                 return
-            obj[clave] = max(minimo, min(maximo, v))
+            obj[clave] = max(minimo, min(maximo, n))
             self._guardar_pronto()
 
-        def salir(_):
-            escribir()
-            e.delete(0, "end")
-            e.insert(0, formato(obj[clave]))
-        e.bind("<KeyRelease>", escribir)
-        e.bind("<FocusOut>", salir, add="+")
-        e.bind("<Button-1>", lambda _: e.focus_force(), add="+")
-        return e
+        def salir(v):
+            escribir(v)
+            s.fijar_campo(k, f"{obj[clave]:g}")
+        s.campo(k, x, y, w, h, f"{obj[clave]:g}", escribir, salir, centrado=True)
 
-    def _deslizador(self, padre, obj, clave, desde, hasta, formato, paso=0.5, tipo=float):
+    def _boton_captura(self, s, clave, x, y, w, h, obtener, fijar, vacio="Elegir"):
+        """Boton que escucha la proxima tecla o combinacion que pulses."""
         t = self.t
-        f = ctk.CTkFrame(padre, fg_color="transparent")
-        lbl = ctk.CTkLabel(f, text=formato(obj[clave]), font=fuente(11, True), text_color=t["texto"], width=58, anchor="e")
-        lbl.pack(side="right")
-
-        def mover(v):
-            v = tipo(round(v / paso) * paso)
-            obj[clave] = v
-            lbl.configure(text=formato(v))
-            self._guardar_pronto()
-        s = ctk.CTkSlider(f, from_=desde, to=hasta, command=mover, height=16, progress_color=t["acento"], button_color=t["acento"],
-                          button_hover_color=t["hover"], fg_color=t["borde"])
-        s.set(obj[clave])
-        s.pack(side="left", fill="x", expand=True, pady=7)
-        return f
-
-    def _captura(self, padre, obtener, fijar, vacio="Elegir", ancho=None):
-        b = ctk.CTkButton(padre, text=obtener() or vacio, font=f_tecla(11), height=30, corner_radius=6, fg_color=self.t["panel"], hover_color=self.t["suave"],
-                          text_color=self.t["acento"] if self.t["modo"] == "dark" else self.t["texto"], border_width=1, border_color=self.t["borde"], **({"width": ancho} if ancho else {}))
-
-        def terminar(combo):
-            self._boton_capturando = None
-            if combo is not None:
-                fijar(combo)
-            if b.winfo_exists():
-                b.configure(text=obtener() or vacio, border_color=self.t["borde"])
+        activo = bool(self._captura_ui and self._captura_ui["clave"] == clave)
+        texto = ("Pulsa... (Esc cancela)" if w > s.px(170) else "Pulsa...") if activo else (obtener() or vacio)
 
         def empezar():
             self.cancelar_captura()
-            b.configure(text="Pulsa... (Esc cancela)" if not ancho else "Pulsa...", border_color=self.t["acento"])
-            self._boton_capturando = (b, obtener() or vacio)
+            self._captura_ui = dict(clave=clave, escena=s)
+
+            def terminar(combo):
+                if not self._captura_ui or self._captura_ui["clave"] != clave:
+                    return
+                self._captura_ui = None
+                if combo is not None:
+                    fijar(combo)
+                if s.winfo_exists():
+                    s.repintar()
             self.motor.capturar(lambda combo: self.cola.put(lambda: terminar(combo)))
-        b.configure(command=empezar)
-        return b
+            s.repintar()
+        s.boton(x, y, w, h, texto, empezar, color=t["panel"], borde=t["acento"] if activo else t["borde"], tam=11, familia=MONO,
+                color_texto=t["acento"] if t["modo"] == "dark" else t["texto"])
 
     def cancelar_captura(self):
-        if self._boton_capturando:
-            b, texto = self._boton_capturando
-            self._boton_capturando = None
+        c, self._captura_ui = self._captura_ui, None
+        if c:
             self.motor.cancelar_captura()
-            if b.winfo_exists():
-                b.configure(text=texto, border_color=self.t["borde"])
+            if c["escena"].winfo_exists():
+                c["escena"].repintar()
 
     # -------------------------------------------------------------- macros
     def _macro_eliminar(self):
@@ -1391,6 +1397,7 @@ class App:
         m["id"], m["tecla"] = datos.nuevo_id(), ""
         m["nombre"] = (m["nombre"] + " copia")[:60]
         self.macros.insert(self.macros.index(self.macro) + 1, m)
+        self._aplicar_motor()
         self.seleccionar(m["id"])
         self._guardar_pronto()
 
@@ -1414,34 +1421,29 @@ class App:
                 self.aviso("")
                 self.motor.iniciar(m, "botón de la ventana")
                 return
-            self.aviso(f"\"{m['nombre']}\" empieza en {n}...", self.t["acento"], ms=0)
+            self.aviso(f"\"{m['nombre']}\" empieza en {n}...", self.t["acento"] if self.t["modo"] == "dark" else None, ms=0)
             self._cuenta_atras = self.root.after(1000, lambda: contar(n - 1))
         contar(m["cuenta"])
 
     # ------------------------------------------------------------ registro
     def _vista_registro(self):
-        t = self.t
+        t, px = self.t, self.px
         m = self.macro
         aj = self.a.ajustes
-        estado = f"Se guardan los últimos {aj['registro_dias']} días." if aj["registro"] else "El registro está apagado. Actívalo en Ajustes."
-        self._encabezado_vista(f"Registro de {m['nombre']}", estado)
+        dias = self.registro.dias(m["id"])
+        if self._registro_dia not in dias:
+            self._registro_dia = dias[0] if dias else None
 
-        barra = ctk.CTkFrame(self.principal, fg_color="transparent")
-        barra.pack(fill="x", padx=22, pady=(0, 8))
-        caja = ctk.CTkTextbox(self.principal, font=("Consolas", 11), fg_color=t["tarjeta"], text_color=t["texto"], corner_radius=10,
-                              wrap="none", scrollbar_button_color=t["borde"], scrollbar_button_hover_color=t["tenue"])
-        caja.pack(fill="both", expand=True, padx=22, pady=(0, 16))
-
-        def mostrar(dia):
-            lineas = self.registro.leer(m["id"], dia) if dia else []
+        def mostrar():
+            lineas = self.registro.leer(m["id"], self._registro_dia) if self._registro_dia else []
             caja.configure(state="normal")
             caja.delete("1.0", "end")
             caja.insert("1.0", "\n".join(lineas) or "Todavía no hay nada aquí. Aparecerá cuando uses esta macro.")
             caja.configure(state="disabled")
 
-        dias = self.registro.dias(m["id"])
-        Selector(self, barra, dias or ["Sin registros"], dias[0] if dias else "Sin registros", mostrar, ancho=150).pack(side="left")
-        self._boton(barra, "Actualizar", self.pintar_principal, width=86, height=30, font=fuente(11, True)).pack(side="left", padx=(8, 0))
+        def elegir(dia):
+            self._registro_dia = dia if dia in dias else None
+            mostrar()
 
         def borrar():
             def confirmar(_):
@@ -1452,9 +1454,24 @@ class App:
         def abrir():
             os.makedirs(self.registro.ruta(m["id"]), exist_ok=True)
             os.startfile(self.registro.ruta(m["id"]))
-        self._boton(barra, "Borrar", borrar, width=70, height=30, font=fuente(11, True)).pack(side="right")
-        self._boton(barra, "Abrir carpeta", abrir, width=100, height=30, font=fuente(11, True)).pack(side="right", padx=(0, 8))
-        mostrar(dias[0] if dias else None)
+
+        def dibujar(s, w, h):
+            estado = f"Se guardan los últimos {aj['registro_dias']} días." if aj["registro"] else "El registro está apagado. Actívalo en Ajustes."
+            y = self._encabezado(s, f"Registro de {m['nombre']}", estado) + px(2)
+            s.selector(px(22), y, px(150), px(30), self._registro_dia or "Sin registros", dias or ["Sin registros"], elegir)
+            s.boton(px(180), y, px(86), px(30), "Actualizar", self.pintar_principal, tam=11, color=t["suave"], hover=t["borde"])
+            s.boton(w - px(22) - px(70), y, px(70), px(30), "Borrar", borrar, tam=11, color=t["suave"], hover=t["borde"])
+            s.boton(w - px(22) - px(178), y, px(100), px(30), "Abrir carpeta", abrir, tam=11, color=t["suave"], hover=t["borde"])
+        Escena(self.principal, self, dibujar, height=px(118)).pack(fill="x")
+        marco = tk.Frame(self.principal, bg=t["tarjeta"])
+        marco.pack(fill="both", expand=True, padx=px(22), pady=(0, px(16)))
+        caja = tk.Text(marco, font=(MONO, -px(12)), bg=t["tarjeta"], fg=t["texto"], bd=0, highlightthickness=0, wrap="none",
+                       padx=px(14), pady=px(12), selectbackground=t["acento"], selectforeground=t["sobre"], cursor="arrow")
+        barra = Barra(marco, self, caja.yview, t["tarjeta"])
+        caja.configure(yscrollcommand=barra.set)
+        barra.pack(side="right", fill="y", pady=px(6), padx=(0, px(2)))
+        caja.pack(side="left", fill="both", expand=True)
+        mostrar()
 
     def _al_cambiar_macro(self, macro, encendida):
         if self.a.ajustes["sonido"]:
@@ -1466,9 +1483,10 @@ class App:
             self._terminar_grabacion()
             return
         self.motor.grabar()
-        self.btn_grabar.configure(text="Terminar grabación", fg_color=ROJO, hover_color=ROJO, text_color="#FFFFFF")
+        if self.cab:
+            self.cab.repintar()
         tecla = self.a.ajustes["tecla_detener"]
-        self.aviso(f"Grabando teclas y clicks. Termina con {tecla} o aqui." if tecla else "Grabando. Termina aqui.", ROJO, ms=0)
+        self.aviso(f"Grabando teclas y clicks. Termina con {tecla} o aquí." if tecla else "Grabando. Termina aquí.", ROJO, ms=0)
 
     def _terminar_grabacion(self):
         if not self.motor.grabando:
@@ -1482,102 +1500,93 @@ class App:
             self.pintar_principal()
 
     # ------------------------------------------------------------- ajustes
-    def _vista_ajustes(self):
-        t = self.t
+    def _dibujar_ajustes(self, s, w, h):
+        t, px = self.t, s.px
         aj = self.a.ajustes
-        self._encabezado_vista("Ajustes", "Cómo se ve y cómo responde Relevo.")
-        cuerpo = ctk.CTkScrollableFrame(self.principal, fg_color="transparent", corner_radius=0, scrollbar_button_color=t["borde"], scrollbar_button_hover_color=t["tenue"])
-        cuerpo.pack(fill="both", expand=True, padx=(16, 8), pady=(0, 12))
+        y = self._encabezado(s, "Ajustes", "Cómo se ve y cómo responde Relevo.") - px(8)
+        der = w - px(36)
 
-        def seccion(titulo):
-            self._texto(cuerpo, titulo, 10, True, t["tenue"], anchor="w").pack(fill="x", padx=8, pady=(10, 3))
-            c = ctk.CTkFrame(cuerpo, fg_color=t["tarjeta"], corner_radius=10)
-            c.pack(fill="x", padx=6)
-            return c
+        def interruptor(clave, despues=None):
+            def cambiar():
+                aj[clave] = not aj[clave]
+                self._guardar_pronto()
+                if despues:
+                    despues()
+                s.repintar()
+            return lambda yc: s.interruptor(der, yc, aj[clave], cambiar)
 
-        def fila(c, titulo, detalle=""):
-            f = ctk.CTkFrame(c, fg_color="transparent")
-            f.pack(fill="x", padx=14, pady=8)
-            txt = ctk.CTkFrame(f, fg_color="transparent")
-            txt.pack(side="left")
-            self._texto(txt, titulo, 12, True, anchor="w", height=18).pack(anchor="w")
-            if detalle:
-                self._texto(txt, detalle, 11, color=t["tenue"], anchor="w", height=16).pack(anchor="w")
-            return f
+        def boton(texto, fn):
+            return lambda yc: s.boton(der - px(70), yc - px(14), px(70), px(28), texto, fn, tam=11, color=t["suave"], hover=t["borde"])
 
-        c = seccion("APARIENCIA")
-        f = fila(c, "Tema")
-        seg = self._segmentado(f, list(TEMAS), self._cambiar_tema)
-        seg.set(aj["tema"])
-        seg.pack(side="right")
+        def tema(yc):
+            s.segmentado(der - px(290), yc - px(15), px(290), px(30), {n: n for n in TEMAS}, aj["tema"], self._cambiar_tema)
 
-        f = fila(c, "Color de acento")
-        otro = self._boton(f, "Otro...", self._acento_libre, height=26, width=60, font=fuente(11, True))
-        otro.pack(side="right", padx=(8, 0))
-        for color in reversed(ACENTOS):
-            ctk.CTkButton(f, text="", width=26, height=26, corner_radius=13, fg_color=color, hover_color=color,
-                          border_width=2, border_color=t["texto"] if color.upper() == aj["acento"].upper() else color,
-                          command=lambda x=color: self._cambiar_acento(x)).pack(side="right", padx=2)
+        def acento(yc):
+            s.boton(der - px(60), yc - px(13), px(60), px(26), "Otro...", self._acento_libre, tam=11, color=t["suave"], hover=t["borde"])
+            x = der - px(72)
+            for color in reversed(ACENTOS):
+                elegido = color.upper() == aj["acento"].upper()
+                s.disco(x, yc, px(26), color, "e", t["texto"] if elegido else None, max(px(2), 1))
+                s.zona(x - px(26), yc - px(13), px(26), px(26), clic=lambda c=color: self._cambiar_acento(c))
+                x -= px(30)
 
-        f = fila(c, "Opacidad", "Para ver lo que hay detrás de la ventana")
+        def opacidad(yc):
+            def mover(v):
+                aj["opacidad"] = v
+                self.root.attributes("-alpha", v / 100)
+                self._guardar_pronto()
+            s.deslizador(der - px(250), yc, px(250), aj["opacidad"], 40, 100, mover, lambda v: f"{v}%", paso=1, tipo=int)
 
-        def opacidad(v):
-            aj["opacidad"] = int(round(v))
-            self.root.attributes("-alpha", aj["opacidad"] / 100)
-            lbl.configure(text=f"{aj['opacidad']}%")
-            self._guardar_pronto()
-        lbl = self._texto(f, f"{aj['opacidad']}%", 11, True, width=40, anchor="e")
-        lbl.pack(side="right")
-        s = ctk.CTkSlider(f, from_=40, to=100, width=200, height=16, command=opacidad, progress_color=t["acento"], button_color=t["acento"], button_hover_color=t["hover"], fg_color=t["borde"])
-        s.set(aj["opacidad"])
-        s.pack(side="right", padx=6)
-
-        self._interruptor(fila(c, "Siempre encima", "La ventana queda sobre los demás programas"), "encima", self._aplicar_ventana)
-        self._interruptor(fila(c, "Sonido al encender o apagar", "Útil cuando la ventana está minimizada"), "sonido")
-
-        c = seccion("ATAJOS GENERALES")
-        for clave, titulo, detalle in (("tecla_detener", "Detener todo", "Para todas las macros y suelta todo al instante"),
-                                       ("tecla_cerrar", "Cerrar Relevo", "Sale del programa desde cualquier ventana")):
-            f = fila(c, titulo, detalle)
-
-            def fijar(combo, k=clave):
-                aj[k] = combo
+        def atajo(clave):
+            def fijar(combo):
+                aj[clave] = combo
                 self._aplicar_motor()
                 self._guardar_pronto()
-            self._captura(f, lambda k=clave: aj[k], fijar, vacio="Sin atajo", ancho=130).pack(side="right")
-
-        c = seccion("REGISTRO DE MACROS")
-        self._interruptor(fila(c, "Guardar registro", "Cuándo empezó y terminó cada macro, y cuánto hizo"), "registro")
-        f = fila(c, "Días que se conservan", "Lo más antiguo se borra al abrir Relevo o al cambiar de día")
-        self._num(f, aj, "registro_dias", int, 1, 365).pack(side="right")
-
-        c = seccion("TUS DATOS")
-        f = fila(c, "Carpeta de configuración", os.path.dirname(self.a.ruta))
-        self._boton(f, "Abrir", lambda: os.startfile(os.path.dirname(self.a.ruta)), width=70, height=28, font=fuente(11, True)).pack(side="right")
-        f = fila(c, "Contadores", "Clicks, teclas y tiempo que Relevo hizo por ti")
+            return lambda yc: self._boton_captura(s, ("ajuste", clave), der - px(130), yc - px(15), px(130), px(30), lambda: aj[clave], fijar, vacio="Sin atajo")
 
         def reiniciar():
             for k in self.a.stats:
                 self.a.stats[k] = 0
             self._guardar_pronto()
-        self._boton(f, "Reiniciar", reiniciar, width=70, height=28, font=fuente(11, True)).pack(side="right")
 
+        carpeta = os.path.dirname(self.a.ruta)
         admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
-        c = seccion("PERMISOS")
-        f = fila(c, "Abrir como administrador" + (" (activo ahora)" if admin else ""),
-                 "Solo si un programa ignora las teclas. Mientras esté al frente, Lightshot no puede capturar.")
-        self._interruptor(f, "admin", lambda: self.aviso("Se aplica la próxima vez que abras Relevo"))
-
-    def _interruptor(self, f, clave, despues=None):
-        def cambiar():
-            self.a.ajustes[clave] = not self.a.ajustes[clave]
-            self._guardar_pronto()
-            if despues:
-                despues()
-        sw = ctk.CTkSwitch(f, text="", width=36, switch_width=34, switch_height=17, progress_color=self.t["acento"], fg_color=self.t["borde"], command=cambiar)
-        if self.a.ajustes[clave]:
-            sw.select()
-        sw.pack(side="right")
+        secciones = (
+            ("APARIENCIA", (
+                ("Tema", "", tema),
+                ("Color de acento", "", acento),
+                ("Opacidad", "Para ver lo que hay detrás de la ventana", opacidad),
+                ("Siempre encima", "La ventana queda sobre los demás programas", interruptor("encima", self._aplicar_ventana)),
+                ("Sonido al encender o apagar", "Útil cuando la ventana está minimizada", interruptor("sonido")))),
+            ("ATAJOS GENERALES", (
+                ("Detener todo", "Para todas las macros y suelta todo al instante", atajo("tecla_detener")),
+                ("Cerrar Relevo", "Sale del programa desde cualquier ventana", atajo("tecla_cerrar")))),
+            ("REGISTRO DE MACROS", (
+                ("Guardar registro", "Cuándo empezó y terminó cada macro, y cuánto hizo", interruptor("registro")),
+                ("Días que se conservan", "Lo más antiguo se borra al abrir Relevo o al cambiar de día",
+                 lambda yc: self._num(s, der - px(56), yc - px(14), px(56), px(28), aj, "registro_dias", int, 1, 365)))),
+            ("TUS DATOS", (
+                ("Carpeta de configuración", carpeta, boton("Abrir", lambda: os.startfile(carpeta))),
+                ("Contadores", "Clicks, teclas y tiempo que Relevo hizo por ti", boton("Reiniciar", reiniciar)))),
+            ("PERMISOS", (
+                ("Abrir como administrador" + (" (activo ahora)" if admin else ""),
+                 "Solo si un programa ignora las teclas. Mientras esté al frente, Lightshot no puede capturar.",
+                 interruptor("admin", lambda: self.aviso("Se aplica la próxima vez que abras Relevo"))),)),
+        )
+        for titulo, filas in secciones:
+            s.texto(px(30), y + px(18), titulo, 10, True, t["tenue"])
+            y += px(30)
+            alto = sum(px(54 if detalle else 46) for _, detalle, _ in filas)
+            s.tarjeta(px(22), y, w - px(44), alto, t["tarjeta"], 10)
+            for nombre, detalle, control in filas:
+                yc = y + px(27 if detalle else 23)
+                s.texto(px(36), yc - (px(9) if detalle else 0), nombre, 12, True)
+                if detalle:
+                    s.texto(px(36), yc + px(9), detalle, 11, color=t["tenue"], ancho=w - px(72) - px(150))
+                control(yc)
+                y += px(54 if detalle else 46)
+            s.sobre = s.fondo
+        return y + px(16)
 
     def _cambiar_tema(self, nombre):
         self.a.ajustes["tema"] = nombre
@@ -1601,11 +1610,11 @@ class App:
                 self.cola.get_nowait()()
             except queue.Empty:
                 break
-        self._vigilar_minimizado()
+        if not self._arrancando:
+            self._vigilar_minimizado()
         self.root.after(30, self._bombear)
 
     def _refrescar(self):
-        t = self.t
         escribiendo = False
         try:
             foco = self.root.focus_get()
@@ -1616,23 +1625,16 @@ class App:
         self.motor.rect_propio = (self.root.winfo_rootx(), self.root.winfo_rooty(),
                                   self.root.winfo_rootx() + self.root.winfo_width(), self.root.winfo_rooty() + self.root.winfo_height())
 
-        for mid, w in self.filas.items():
-            on = self.motor.corriendo(mid)
-            estado = "pausa" if on and self.motor.pausada(mid) else on
-            if self._estado_filas.get(mid) != estado:
-                self._estado_filas[mid] = estado
-                w["punto"].configure(fg_color=AMBAR if estado == "pausa" else t["acento"] if on else t["borde"])
-                w["boton"].configure(text=I_STOP if on else I_PLAY, text_color=t["acento"] if on else t["tenue"])
-        if self.btn_probar and self.btn_probar.winfo_exists() and self.macro:
-            on = self.motor.corriendo(self.macro["id"])
-            texto = "Detener" if on else "Iniciar"
-            if self.btn_probar.cget("text") != texto:
-                self.btn_probar.configure(text=texto, fg_color=ROJO if on else t["acento"], hover_color=ROJO if on else t["hover"],
-                                          text_color="#FFFFFF" if on else t["sobre"])
-        s = self.a.stats
-        horas = s["segundos"] / 3600
-        tiempo = f"{horas:.1f} h" if horas >= 1 else f"{s['segundos'] / 60:.0f} min"
-        self.lbl_stats.configure(text=f"Te ahorraste {int(s['clicks']):,} clicks y {int(s['teclas']):,} teclas\nRelevo trabajó {tiempo} por ti".replace(",", "."))
+        # Las macros se encienden y apagan desde otro hilo: aqui se nota y se redibuja lo justo.
+        estado = tuple((m["id"], self.motor.corriendo(m["id"]), self.motor.pausada(m["id"])) for m in self.macros)
+        if estado != self._estado_macros:
+            self._estado_macros = estado
+            self.lista.repintar()
+            if self.cab and self.cab.winfo_exists():
+                self.cab.repintar()
+        texto = self._texto_stats()
+        if self._id_stats and self.lat_pie.itemcget(self._id_stats, "text") != texto:
+            self.lat_pie.itemconfigure(self._id_stats, text=texto)
         self._ultimo_guardado_stats += 1
         if self._ultimo_guardado_stats >= 300:  # cada 30 s
             self._ultimo_guardado_stats = 0

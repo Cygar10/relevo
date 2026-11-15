@@ -5,6 +5,8 @@ import os
 import random
 import string
 
+import patron
+
 APP = "Relevo"
 RUTA = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP, "config.json")
 
@@ -14,10 +16,13 @@ MODOS = {"alternar": "Encender / apagar", "mantener": "Mientras la mantengo", "u
 PASOS = {
     "click": ("Click", "", "Clicks de mouse a la velocidad que elijas",
               {"boton": "Mouse Izq", "veces": 1, "cps": 4.5}),
-    "tecla": ("Tecla", "", "Pulsa una tecla o combinación, y cuánto dura",
+    "tecla": ("Tecla", "", "Un toque, o mantenla los segundos que elijas",
               {"teclas": "Espacio", "min": 0.0, "max": 0.0}),
     "aleatoria": ("Tecla al azar", "", "Elige una tecla de tu lista cada vez",
                   {"lista": "W A S D", "min": 0.5, "max": 5.0}),
+    "patron": ("Patrón de teclas", "", "Varias teclas seguidas, cada una con su tiempo",
+               {"patron": "A 3, D 5", "orden": "seguido", "min": 0.0, "max": 0.0,
+                "pausa_min": 0.0, "pausa_max": 0.0, "veces": 1}),
     "espera": ("Espera", "", "Pausa fija o entre dos tiempos",
                {"min": 1.0, "max": 1.0}),
     "estado": ("Mantener / soltar", "", "Deja algo presionado hasta que lo sueltes",
@@ -65,6 +70,8 @@ PLANTILLAS = [
     ("En blanco", "Empieza de cero y arma los pasos tú mismo", lambda: nueva_macro()),
     ("Autoclick", "Clicks continuos a 4.5 por segundo, con variación natural", _plantilla_autoclick),
     ("Movimiento aleatorio", "WASD al azar, de 0.5 a 5 s por paso", _plantilla_movimiento),
+    ("Patrón de teclas", "A tres segundos y luego D cinco: cada tecla con su tiempo", lambda: nueva_macro(
+        "Patrón de teclas", "", [nuevo_paso("patron", patron="A 3, D 5")], variacion=0)),
     ("Mantener click", "El botón queda presionado mientras la macro corre", lambda: nueva_macro(
         "Mantener click", "", [nuevo_paso("estado", accion="presionar", objetivo="Mouse Izq"),
                                nuevo_paso("espera", min=3600.0, max=3600.0)], variacion=0)),
@@ -119,10 +126,12 @@ def normalizar_paso(p):
             elif isinstance(base, str):
                 n[clave] = str(p[clave])
     n["prob"] = _num(n["prob"], 100, 0, 100, int)
-    if n["tipo"] in ("click", "repetir"):
+    if n["tipo"] in ("click", "repetir", "patron"):
         n["veces"] = _num(n["veces"], 1, 1, 10000, int)
     if n["tipo"] == "repetir":
         n["atras"] = _num(n["atras"], 1, 1, 1000, int)
+    if n["tipo"] == "patron" and n["orden"] not in patron.ORDENES:
+        n["orden"] = "seguido"
     if "cps" in n:
         n["cps"] = _num(n["cps"], 4.5, 0.0, 100.0)
     return n

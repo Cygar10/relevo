@@ -6,6 +6,7 @@ import threading
 import time
 
 import entrada
+import patron
 from datos import nuevo_paso
 
 _winmm = ctypes.WinDLL("winmm")
@@ -119,6 +120,34 @@ class Ejecutor(threading.Thread):
         teclas = [t for t in p["lista"].replace(",", " ").split() if entrada.es_valida(t)]
         if teclas:
             self._pulsar([random.choice(teclas)], self._ajustar(self._rango(p)))
+
+    def _patron(self, p):
+        """Varias teclas, cada una con su tiempo: 'A 3, D 5' mantiene A 3 s y luego D 5 s."""
+        elementos, _ = patron.leer(p["patron"])
+        if not elementos:
+            return
+        for _ in range(p["veces"]):
+            orden = list(elementos)
+            if p["orden"] == "azar":
+                random.shuffle(orden)
+            elif p["orden"] == "vaiven":
+                orden += orden[-2:0:-1]
+            elif p["orden"] == "una":
+                orden = [random.choice(orden)]
+            for el in orden:
+                for _ in range(el["veces"]):
+                    if self.parar.is_set():
+                        return
+                    self._revisar_ventana()
+                    a, b = (el["min"], el["max"]) if el["min"] is not None else sorted((p["min"], p["max"]))
+                    duracion = self._ajustar(random.uniform(a, b))
+                    if not el["teclas"]:
+                        self._dormir(duracion)
+                        continue
+                    self._pulsar(el["teclas"], duracion)
+                    pausa = random.uniform(*sorted((p["pausa_min"], p["pausa_max"])))
+                    if pausa > 0:
+                        self._dormir(self._ajustar(pausa))
 
     @staticmethod
     def _rango(p):

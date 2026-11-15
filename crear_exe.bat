@@ -1,10 +1,13 @@
 @echo off
 cd /d "%~dp0"
+rem Usa el lanzador "py" si existe: en algunos Windows "python" solo abre la tienda.
+set PY=python
+where py >nul 2>nul && set PY=py
 echo Instalando dependencias...
-python -m pip install --upgrade pyinstaller customtkinter pillow
+%PY% -m pip install --upgrade pyinstaller customtkinter pillow
 echo.
 echo Creando el ejecutable...
-python -m PyInstaller --noconfirm --onefile --noconsole --name "Relevo" --icon relevo.ico --add-data "relevo.ico;." --collect-all customtkinter --distpath . main.py
+%PY% -m PyInstaller --noconfirm --distpath . Relevo.spec
 echo.
 echo Listo. Relevo.exe quedo en esta misma carpeta.
 pause

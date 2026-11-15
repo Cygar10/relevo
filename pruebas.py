@@ -12,6 +12,7 @@ import unittest
 
 import datos
 import entrada
+import patron
 from datos import nueva_macro, nuevo_paso
 from motor import Ejecutor, Motor, eventos_a_pasos
 from registro import Registro
@@ -136,6 +137,78 @@ class Ejecucion(unittest.TestCase):
         e.parar.set()
         e.join(1)
         self.assertGreater(s["clicks"] - antes, antes * 3)
+
+
+class Patron(unittest.TestCase):
+    def duraciones(self, f):
+        """Cuanto estuvo abajo cada tecla, en el orden en que se pulsaron."""
+        abajo, res = {}, []
+        for tipo, tecla, t in f.eventos:
+            if tipo == "abajo":
+                abajo[tecla] = t
+            elif tipo == "arriba":
+                res.append((tecla, t - abajo.pop(tecla)))
+        return res
+
+    def test_a_un_tiempo_y_d_otro(self):
+        m = nueva_macro(modo="una_vez", variacion=0, pasos=[nuevo_paso("patron", patron="A 0.3, D 0.6")])
+        f, _ = correr(m, 5)
+        (a, ta), (d, td) = self.duraciones(f)
+        self.assertEqual((a, d), ("A", "D"))
+        self.assertAlmostEqual(ta, 0.3, delta=0.08)
+        self.assertAlmostEqual(td, 0.6, delta=0.08)
+
+    def test_lectura(self):
+        els, errores = patron.leer("a 3, Ctrl+c, espacio x3, espera 1.5, 0.5, w 1-2s, mouse izq 2, Mouse 4, 5")
+        self.assertEqual(errores, [])
+        self.assertEqual([e["teclas"] for e in els],
+                         [["A"], ["Ctrl", "C"], ["Espacio"], [], [], ["W"], ["Mouse Izq"], ["Mouse 4"], ["5"]])
+        self.assertEqual([(e["min"], e["max"]) for e in els],
+                         [(3, 3), (None, None), (None, None), (1.5, 1.5), (0.5, 0.5), (1, 2), (2, 2), (None, None), (None, None)])
+        self.assertEqual(els[2]["veces"], 3)
+
+    def test_errores_no_rompen(self):
+        els, errores = patron.leer("A 1, nope 3, espera, , B")
+        self.assertEqual([e["teclas"] for e in els], [["A"], ["B"]])
+        self.assertEqual(len(errores), 2)
+        f, _ = correr(nueva_macro(modo="una_vez", pasos=[nuevo_paso("patron", patron="@@, ???"), nuevo_paso("tecla", teclas="C")]), 2)
+        self.assertEqual(f.nombres(), ["C"])
+
+    def test_ordenes(self):
+        def teclas(orden, veces=1):
+            m = nueva_macro(modo="una_vez", pasos=[nuevo_paso("patron", patron="A, B, C", orden=orden, veces=veces)])
+            return correr(m, 5)[0].nombres()
+        self.assertEqual(teclas("seguido", 2), ["A", "B", "C", "A", "B", "C"])
+        self.assertEqual(teclas("vaiven", 2), ["A", "B", "C", "B", "A", "B", "C", "B"])
+        self.assertEqual(sorted(teclas("azar")), ["A", "B", "C"])
+        self.assertEqual(len(teclas("una", 3)), 3)
+
+    def test_duracion_normal_pausa_y_repeticion(self):
+        m = nueva_macro(modo="una_vez", variacion=0, pasos=[
+            nuevo_paso("patron", patron="A x2, B 0.1", min=0.25, max=0.25, pausa_min=0.2, pausa_max=0.2)])
+        f, _ = correr(m, 5)
+        d = self.duraciones(f)
+        self.assertEqual([t for t, _ in d], ["A", "A", "B"])
+        self.assertAlmostEqual(d[0][1], 0.25, delta=0.08)
+        self.assertAlmostEqual(d[2][1], 0.1, delta=0.08)
+        bajadas = [e[2] for e in f.eventos if e[0] == "abajo"]
+        self.assertAlmostEqual(bajadas[1] - bajadas[0], 0.45, delta=0.1)
+
+    def test_se_detiene_a_mitad_y_suelta(self):
+        m = nueva_macro(pasos=[nuevo_paso("patron", patron="A 30, D 30")], variacion=0)
+        f, s = Falsa(), stats()
+        e = Ejecutor(m, s, salida=f)
+        e.start()
+        time.sleep(0.2)
+        e.parar.set()
+        e.join(1)
+        self.assertFalse(e.is_alive())
+        self.assertEqual((f.nombres("abajo"), f.nombres("arriba")), (["A"], ["A"]))
+
+    def test_normalizar_y_describir(self):
+        p = datos.normalizar_paso({"tipo": "patron", "patron": 5, "orden": "raro", "veces": -3, "pausa_max": "x"})
+        self.assertEqual((p["patron"], p["orden"], p["veces"], p["pausa_max"]), ("5", "seguido", 1, 0.0))
+        self.assertEqual(patron.describir("a 3, d 2-5, espera 1, w x2"), "A 3 s → D 2-5 s → espera 1 s → W ×2")
 
 
 class Atajos(unittest.TestCase):

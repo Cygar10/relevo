@@ -3,5 +3,6 @@ __pycache__/
 build/
 dist/
 *.spec
+!Relevo.spec
 # El .exe se publica en Releases, no en el repositorio
 *.exe
