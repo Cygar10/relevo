@@ -97,7 +97,8 @@ AJUSTES_BASE = {
 
 
 def _perfil_inicial():
-    return {"id": nuevo_id(), "nombre": "Mi perfil", "macros": [_plantilla_autoclick()]}
+    """El primer arranque empieza vacio: cada quien arma sus macros desde cero o desde una plantilla."""
+    return {"id": nuevo_id(), "nombre": "Mi perfil", "macros": []}
 
 
 # ------------------------------------------------------------ normalizacion

@@ -18,11 +18,10 @@ Como en una carrera de relevos: le pasas el testigo y él sigue.
 - **Perfiles:** uno por cada tarea, y se pueden exportar para compartirlos.
 - **Apariencia:** 4 temas, color de acento, opacidad, siempre encima y modo compacto.
 
-Al abrirlo por primera vez trae un perfil de ejemplo, **Mi perfil**, que puedes cambiar o borrar:
+Al abrirlo por primera vez está vacío: creas tu primera macro desde cero o partiendo de una plantilla (autoclick, patrón de teclas, anti-AFK...). Solo vienen dos atajos generales:
 
 | Atajo | Qué hace |
 | --- | --- |
-| `F1` | Autoclick a 4.5 clicks por segundo, con variación de ±10% |
 | `F10` | Detiene todas las macros y suelta todo |
 | `F9` | Cierra Relevo |
 

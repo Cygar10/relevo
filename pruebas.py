@@ -312,15 +312,14 @@ class Grabar(unittest.TestCase):
 
 
 class Datos(unittest.TestCase):
-    def test_primer_arranque_trae_un_perfil_generico(self):
+    def test_primer_arranque_empieza_vacio(self):
         with tempfile.TemporaryDirectory() as d:
             a = datos.Almacen(os.path.join(d, "x", "c.json"))
             self.assertEqual(a.perfil["nombre"], "Mi perfil")
             self.assertFalse(a.ajustes["encima"])
-            m = {x["tecla"]: x for x in a.perfil["macros"]}
-            self.assertEqual(m["F1"]["pasos"][0]["cps"], 4.5)
-            self.assertEqual(m["F1"]["variacion"], 10)
-            self.assertEqual(list(m), ["F1"])
+            self.assertEqual(a.perfil["macros"], [])
+            self.assertEqual(a.stats, {"clicks": 0, "teclas": 0, "segundos": 0.0})
+            self.assertEqual(a.ajustes["tecla_detener"], "F10")
             self.assertEqual(a.ajustes["tecla_cerrar"], "F9")
             a.guardar()
             b = datos.Almacen(a.ruta)
